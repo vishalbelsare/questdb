@@ -29,20 +29,22 @@ import io.questdb.std.str.Path;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.Comparator;
-
 import static io.questdb.std.Numbers.hexDigits;
 
 public final class Chars {
-    public static final Comparator<CharSequence> CHAR_SEQUENCE_COMPARATOR = Chars::compare;
-    public static final Comparator<CharSequence> CHAR_SEQUENCE_COMPARATOR_DESC = Chars::compareDescending;
-
     private Chars() {
+    }
+
+    public static long toMemory(CharSequence sequence) {
+        int length = sequence.length();
+        long ptr = Unsafe.malloc(length);
+        asciiStrCpy(sequence, length, ptr);
+        return ptr;
     }
 
     public static void asciiCopyTo(char[] chars, int start, int len, long dest) {
         for (int i = 0; i < len; i++) {
-            Unsafe.getUnsafe().putByte(dest + i, (byte) chars[i + start]);
+            Unsafe.getUnsafe().putByte(dest + i, (byte) chars[start + i]);
         }
     }
 
@@ -55,6 +57,18 @@ public final class Chars {
     public static void asciiStrCpy(final CharSequence value, int lo, final int len, final long address) {
         for (int i = 0; i < len; i++) {
             Unsafe.getUnsafe().putByte(address + i, (byte) value.charAt(lo + i));
+        }
+    }
+
+    public static String asciiStrRead(final long address, final int len) {
+        StringBuilder builder = new StringBuilder(len);
+        asciiStrRead(address, len, builder);
+        return builder.toString();
+    }
+
+    public static void asciiStrRead(final long address, final int len, StringBuilder builder) {
+        for (int i = 0; i < len; i++) {
+            builder.append((char) Unsafe.getUnsafe().getByte(address + i));
         }
     }
 

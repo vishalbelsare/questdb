@@ -24,18 +24,17 @@
 
 package io.questdb.std.str;
 
-import io.questdb.std.Misc;
-import io.questdb.std.Numbers;
-import io.questdb.std.ObjHashSet;
-import io.questdb.std.Sinkable;
+import io.questdb.std.ThreadLocal;
+import io.questdb.std.*;
 import io.questdb.std.datetime.microtime.TimestampFormatUtils;
 
 import java.util.Set;
 
 public abstract class AbstractCharSink implements CharSink {
 
-    private static final ThreadLocal<ObjHashSet<Throwable>> tlSet = ThreadLocal.withInitial(ObjHashSet::new);
+    private static final ThreadLocal<ObjHashSet<Throwable>> tlSet = new ThreadLocal<>(ObjHashSet::new);
     private final char[] doubleDigits = new char[21];
+    private final long decimalDigits = Unsafe.malloc(21L);
 
     @Override
     public char[] getDoubleDigitsBuffer() {
@@ -109,6 +108,44 @@ public abstract class AbstractCharSink implements CharSink {
     public CharSink put(double value, int scale) {
         Numbers.append(this, value, scale);
         return this;
+    }
+
+    @Override
+    public CharSink putDirect(float value) {
+        long decimalDigits = this.decimalDigits;
+        int length = DecimalConversion.appendFloat(decimalDigits, value);
+        readDecimalDigits(length, decimalDigits);
+        return this;
+    }
+
+    @Override
+    public CharSink putDirect(float value, int scale) {
+        long decimalDigits = this.decimalDigits;
+        int length = DecimalConversion.appendFloat(decimalDigits, value, scale);
+        readDecimalDigits(length, decimalDigits);
+        return this;
+    }
+
+    @Override
+    public CharSink putDirect(double value) {
+        long decimalDigits = this.decimalDigits;
+        int length = DecimalConversion.appendDouble(decimalDigits, value);
+        readDecimalDigits(length, decimalDigits);
+        return this;
+    }
+
+    @Override
+    public CharSink putDirect(double value, int scale) {
+        long decimalDigits = this.decimalDigits;
+        int length = DecimalConversion.appendDouble(decimalDigits, value, scale);
+        readDecimalDigits(length, decimalDigits);
+        return this;
+    }
+
+    private void readDecimalDigits(int length, long ptr) {
+        for (int i = 0; i < length; i++) {
+            put((char) Unsafe.getUnsafe().getByte(ptr + i));
+        }
     }
 
     @Override
