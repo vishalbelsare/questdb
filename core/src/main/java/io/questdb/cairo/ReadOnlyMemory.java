@@ -144,15 +144,8 @@ public class ReadOnlyMemory extends VirtualMemory implements ReadOnlyColumn {
         return size;
     }
 
-    private long computePageSize(long memorySize) {
-        if (memorySize < pageSize) {
-            return Math.max(ff.getPageSize(), (memorySize / ff.getPageSize()) * ff.getPageSize());
-        }
-        return pageSize;
-    }
-
     private void grow0(final long size) {
-        long targetPageSize = computePageSize(size);
+        long targetPageSize = pageSize;
         if (targetPageSize != getMapPageSize()) {
             setPageSize(targetPageSize);
             ensurePagesListCapacity(size);
