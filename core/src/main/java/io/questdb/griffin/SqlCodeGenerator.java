@@ -936,6 +936,7 @@ public class SqlCodeGenerator implements Mutable {
             SqlExecutionContext executionContext,
             int timestampIndex,
             int hashColumnIndex,
+            int hashColumnType,
             @NotNull IntList columnIndexes,
             @NotNull CharSequenceHashSet prefixes
     ) throws SqlException {
@@ -1087,6 +1088,7 @@ public class SqlCodeGenerator implements Mutable {
                         dataFrameCursorFactory,
                         latestByIndex,
                         hashColumnIndex,
+                        hashColumnType,
                         filter,
                         columnIndexes,
                         prefixes
@@ -2437,9 +2439,11 @@ public class SqlCodeGenerator implements Mutable {
             );
 
             int hashColumnIndex = -1; // latest by without prefix match part
+            int hashColumnType = ColumnType.UNDEFINED;
             if (prefixes.size() > 1) {
                 CharSequence column = prefixes.get(0);
                 hashColumnIndex = reader.getMetadata().getColumnIndex(column);
+                hashColumnType = reader.getMetadata().getColumnType(hashColumnIndex);
                 prefixes.remove(column);
             }
 
@@ -2499,6 +2503,7 @@ public class SqlCodeGenerator implements Mutable {
                             executionContext,
                             readerTimestampIndex,
                             hashColumnIndex,
+                            hashColumnType,
                             columnIndexes,
                             prefixes
                     );
@@ -2757,6 +2762,7 @@ public class SqlCodeGenerator implements Mutable {
                         new FullBwdDataFrameCursorFactory(engine, tableName, model.getTableId(), model.getTableVersion()),
                         listColumnFilterA.getColumnIndexFactored(0),
                         hashColumnIndex,
+                        hashColumnType,
                         null,
                         columnIndexes,
                         prefixes
