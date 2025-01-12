@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,12 +24,18 @@
 
 package io.questdb.griffin.engine.functions;
 
+import io.questdb.cairo.CairoException;
 import io.questdb.cairo.ColumnType;
-import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.model.IntervalUtils;
 import io.questdb.std.BinarySequence;
 import io.questdb.std.Long256;
+import io.questdb.std.Numbers;
+import io.questdb.std.NumericException;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
+import io.questdb.std.str.Utf8StringSink;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -39,6 +45,8 @@ import org.jetbrains.annotations.Nullable;
  * getInt() are not cached.*
  */
 public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
+    private final Utf8StringSink utf8SinkA = new Utf8StringSink();
+    private final Utf8StringSink utf8SinkB = new Utf8StringSink();
 
     @Override
     public final BinarySequence getBin(Record rec) {
@@ -62,7 +70,8 @@ public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
 
     @Override
     public char getChar(Record rec) {
-        throw new UnsupportedOperationException();
+        CharSequence value = getSymbol(rec);
+        return value == null ? 0 : value.charAt(0);
     }
 
     @Override
@@ -81,12 +90,47 @@ public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
     }
 
     @Override
+    public byte getGeoByte(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int getGeoInt(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getGeoLong(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public short getGeoShort(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final int getIPv4(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public final long getLong(Record rec) {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public void getLong256(Record rec, CharSink sink) {
+    public long getLong128Hi(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getLong128Lo(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void getLong256(Record rec, CharSink<?> sink) {
         throw new UnsupportedOperationException();
     }
 
@@ -110,14 +154,14 @@ public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
         throw new UnsupportedOperationException();
     }
 
-    @Override
-    public CharSequence getStr(Record rec) {
-        return getSymbol(rec);
+    @Nullable
+    public StaticSymbolTable getStaticSymbolTable() {
+        return null;
     }
 
     @Override
-    public void getStr(Record rec, CharSink sink) {
-        throw new UnsupportedOperationException();
+    public CharSequence getStrA(Record rec) {
+        return getSymbol(rec);
     }
 
     @Override
@@ -132,27 +176,15 @@ public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
 
     @Override
     public final long getTimestamp(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public byte getGeoByte(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public short getGeoShort(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int getGeoInt(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public long getGeoLong(Record rec) {
-        throw new UnsupportedOperationException();
+        final CharSequence value = getSymbol(rec);
+        if (value != null) {
+            try {
+                return IntervalUtils.parseFloorPartialTimestamp(value);
+            } catch (NumericException e) {
+                throw CairoException.nonCritical().put("invalid timestamp: [").put(value).put(']');
+            }
+        }
+        return Numbers.LONG_NULL;
     }
 
     @Override
@@ -160,15 +192,40 @@ public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
         return ColumnType.SYMBOL;
     }
 
-    @Nullable
-    public StaticSymbolTable getStaticSymbolTable() {
+    @Override
+    public Utf8Sequence getVarcharA(Record rec) {
+        final CharSequence cs = getStrA(rec);
+        if (cs != null) {
+            utf8SinkA.clear();
+            utf8SinkA.put(cs);
+            return utf8SinkA;
+        }
         return null;
     }
+
+    @Override
+    public Utf8Sequence getVarcharB(Record rec) {
+        final CharSequence cs = getStrB(rec);
+        if (cs != null) {
+            utf8SinkB.clear();
+            utf8SinkB.put(cs);
+            return utf8SinkB;
+        }
+        return null;
+    }
+
+    @Override
+    public final int getVarcharSize(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    public abstract boolean isSymbolTableStatic();
 
     /**
      * A clone of function's symbol table to enable concurrent SQL execution.
      * During such execution symbol table clones will be assigned to individual executing
      * thread.
+     *
      * @return clone of symbol table
      */
     @Nullable
@@ -176,10 +233,8 @@ public abstract class SymbolFunction implements ScalarFunction, SymbolTable {
         return null;
     }
 
-    public abstract boolean isSymbolTableStatic();
-
     @Override
-    public boolean isReadThreadSafe() {
+    public boolean supportsParallelism() {
         return false;
     }
 }

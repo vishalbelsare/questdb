@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ package io.questdb.griffin.engine.functions.constants;
 import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.GeoHashes;
 import io.questdb.cairo.sql.Record;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.GeoByteFunction;
 
 public class GeoByteConstant extends GeoByteFunction implements ConstantFunction {
@@ -42,5 +43,15 @@ public class GeoByteConstant extends GeoByteFunction implements ConstantFunction
 
     public byte getGeoByte(Record rec) {
         return hash;
+    }
+
+    @Override
+    public boolean isNullConstant() {
+        return hash == GeoHashes.BYTE_NULL;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.val(hash, ColumnType.getGeoHashBits(type));
     }
 }

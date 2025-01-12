@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,12 +27,12 @@ package io.questdb.std;
 import java.util.Arrays;
 
 public class ObjStack<T> implements Mutable {
-    private static final int MIN_INITIAL_CAPACITY = 8;
     private static final int DEFAULT_INITIAL_CAPACITY = 16;
+    private static final int MIN_INITIAL_CAPACITY = 8;
     private T[] elements;
     private int head;
-    private int tail;
     private int mask;
+    private int tail;
 
     public ObjStack() {
         this(DEFAULT_INITIAL_CAPACITY);

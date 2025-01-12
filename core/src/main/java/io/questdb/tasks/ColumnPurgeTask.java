@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,22 +24,26 @@
 
 package io.questdb.tasks;
 
+import io.questdb.cairo.TableToken;
 import io.questdb.std.LongList;
 import io.questdb.std.Mutable;
+import io.questdb.std.Transient;
+import org.jetbrains.annotations.NotNull;
 
 public class ColumnPurgeTask implements Mutable {
     public static final int BLOCK_SIZE = 4;
     public static final int OFFSET_COLUMN_VERSION = 0;
-    public static final int OFFSET_PARTITION_TIMESTAMP = 1;
     public static final int OFFSET_PARTITION_NAME_TXN = 2;
+    public static final int OFFSET_PARTITION_TIMESTAMP = 1;
+    public static final int OFFSET_UPDATE_ROW_ID = 3;
     private final LongList updatedColumnInfo = new LongList();
     private CharSequence columnName;
-    private String tableName;
-    private int tableId;
-    private int partitionBy;
-    private long updateTxn;
     private int columnType;
+    private int partitionBy;
+    private int tableId;
+    private TableToken tableName;
     private long truncateVersion;
+    private long updateTxn;
 
     public void appendColumnInfo(long columnVersion, long partitionTimestamp, long partitionNameTxn) {
         updatedColumnInfo.add(columnVersion, partitionTimestamp, partitionNameTxn, 0L);
@@ -82,7 +86,7 @@ public class ColumnPurgeTask implements Mutable {
         return tableId;
     }
 
-    public String getTableName() {
+    public TableToken getTableName() {
         return tableName;
     }
 
@@ -90,17 +94,22 @@ public class ColumnPurgeTask implements Mutable {
         return truncateVersion;
     }
 
-    public LongList getUpdatedColumnInfo() {
-        return updatedColumnInfo;
-    }
-
     public long getUpdateTxn() {
         return updateTxn;
     }
 
+    public LongList getUpdatedColumnInfo() {
+        return updatedColumnInfo;
+    }
+
+    public boolean isEmpty() {
+        return tableName == null;
+    }
+
     public void of(
-            String tableName,
-            CharSequence columnName,
+            @NotNull
+            TableToken tableName,
+            String columnName,
             int tableId,
             long truncateVersion,
             int columnType,
@@ -118,16 +127,34 @@ public class ColumnPurgeTask implements Mutable {
     }
 
     public void of(
-            String tableName,
-            CharSequence columnName,
+            @NotNull
+            TableToken tableName,
+            String columnName,
             int tableId,
             int truncateVersion,
             int columnType,
             int partitionBy,
             long updateTxn,
-            LongList columnVersions
+            @Transient LongList columnVersions
     ) {
         of(tableName, columnName, tableId, truncateVersion, columnType, partitionBy, updateTxn);
         this.updatedColumnInfo.add(columnVersions);
+    }
+
+    public void of(
+            @NotNull
+            TableToken tableName,
+            String columnName,
+            int tableId,
+            int truncateVersion,
+            int columnType,
+            int partitionBy,
+            long updateTxn,
+            @Transient LongList columnVersions,
+            int columnVersionsLo,
+            int columnVersionsHi
+    ) {
+        of(tableName, columnName, tableId, truncateVersion, columnType, partitionBy, updateTxn);
+        this.updatedColumnInfo.add(columnVersions, columnVersionsLo, columnVersionsHi);
     }
 }

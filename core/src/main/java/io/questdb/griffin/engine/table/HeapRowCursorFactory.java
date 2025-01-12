@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,23 +24,44 @@
 
 package io.questdb.griffin.engine.table;
 
-import io.questdb.cairo.TableReader;
-import io.questdb.cairo.sql.DataFrame;
-import io.questdb.cairo.sql.RowCursor;
-import io.questdb.cairo.sql.RowCursorFactory;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.ObjList;
 
+/**
+ * Returns rows from current page frame in table (physical) order:
+ * - fetches first record index/row id per cursor into priority queue
+ * - then returns record with the smallest available index and adds next
+ * record from related cursor into queue until all cursors are exhausted.
+ */
 public class HeapRowCursorFactory implements RowCursorFactory {
-    private final ObjList<? extends RowCursorFactory> cursorFactories;
-    private final ObjList<RowCursor> cursors;
     private final HeapRowCursor cursor;
+    private final ObjList<? extends RowCursorFactory> cursorFactories;
+    // used to skip some cursor factories if values repeat
+    private final int[] cursorFactoriesIdx;
+    private final ObjList<RowCursor> cursors;
 
-    public HeapRowCursorFactory(ObjList<? extends RowCursorFactory> cursorFactories) {
+    public HeapRowCursorFactory(ObjList<? extends RowCursorFactory> cursorFactories, int[] cursorFactoriesIdx) {
         this.cursorFactories = cursorFactories;
         this.cursors = new ObjList<>();
         this.cursor = new HeapRowCursor();
+        this.cursorFactoriesIdx = cursorFactoriesIdx;
+    }
+
+    @Override
+    public RowCursor getCursor(PageFrame pageFrame, PageFrameMemory pageFrameMemory) {
+        for (int i = 0, n = cursorFactories.size(); i < n; i++) {
+            cursors.extendAndSet(i, cursorFactories.getQuick(i).getCursor(pageFrame, pageFrameMemory));
+        }
+        cursor.of(cursors, cursorFactoriesIdx[0]);
+        return cursor;
+    }
+
+    @Override
+    public void init(PageFrameCursor pageFrameCursor, SqlExecutionContext sqlExecutionContext) throws SqlException {
+        RowCursorFactory.init(cursorFactories, pageFrameCursor, sqlExecutionContext);
     }
 
     @Override
@@ -49,16 +70,20 @@ public class HeapRowCursorFactory implements RowCursorFactory {
     }
 
     @Override
-    public RowCursor getCursor(DataFrame dataFrame) {
-        for (int i = 0, n = cursorFactories.size(); i < n; i++) {
-            cursors.extendAndSet(i, cursorFactories.getQuick(i).getCursor(dataFrame));
-        }
-        cursor.of(cursors);
-        return cursor;
+    public boolean isUsingIndex() {
+        return true;
     }
 
     @Override
-    public void prepareCursor(TableReader tableReader, SqlExecutionContext sqlExecutionContext) throws SqlException {
-        RowCursorFactory.prepareCursor(cursorFactories, tableReader, sqlExecutionContext);
+    public void prepareCursor(PageFrameCursor pageFrameCursor) {
+        RowCursorFactory.prepareCursor(cursorFactories, pageFrameCursor);
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Table-order scan");
+        for (int i = 0, n = cursorFactories.size(); i < n; i++) {
+            sink.child(cursorFactories.getQuick(i));
+        }
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ package io.questdb.griffin.engine.functions.columns;
 
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.ScalarFunction;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.Long256Function;
 import io.questdb.std.Long256;
 import io.questdb.std.ObjList;
@@ -49,7 +50,7 @@ public class Long256Column extends Long256Function implements ScalarFunction {
     }
 
     @Override
-    public void getLong256(Record rec, CharSink sink) {
+    public void getLong256(Record rec, CharSink<?> sink) {
         rec.getLong256(columnIndex, sink);
     }
 
@@ -63,15 +64,15 @@ public class Long256Column extends Long256Function implements ScalarFunction {
         return rec.getLong256B(columnIndex);
     }
 
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.putColumnName(columnIndex);
+    }
+
     static {
         COLUMNS.setPos(STATIC_COLUMN_COUNT);
         for (int i = 0; i < STATIC_COLUMN_COUNT; i++) {
             COLUMNS.setQuick(i, new Long256Column(i));
         }
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return true;
     }
 }

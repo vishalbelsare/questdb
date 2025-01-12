@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ package io.questdb.griffin.engine.functions;
 
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.SymbolTableSource;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.groupby.GroupByUtils;
@@ -39,23 +40,35 @@ public interface MultiArgFunction extends Function {
         Misc.freeObjList(getArgs());
     }
 
+    ObjList<Function> getArgs();
+
     @Override
     default void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
         Function.init(getArgs(), symbolTableSource, executionContext);
     }
 
     @Override
-    default void toTop() {
-        GroupByUtils.toTop(getArgs());
+    default void initCursor() {
+        Function.initCursor(getArgs());
     }
-
-    ObjList<Function> getArgs();
 
     @Override
     default boolean isConstant() {
         ObjList<Function> args = getArgs();
-        for(int i = 0, n = args.size(); i < n; i++) {
+        for (int i = 0, n = args.size(); i < n; i++) {
             if (!args.getQuick(i).isConstant()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    default boolean isThreadSafe() {
+        final ObjList<Function> args = getArgs();
+        for (int i = 0, n = args.size(); i < n; i++) {
+            final Function function = args.getQuick(i);
+            if (!function.isThreadSafe()) {
                 return false;
             }
         }
@@ -75,14 +88,24 @@ public interface MultiArgFunction extends Function {
     }
 
     @Override
-    default boolean isReadThreadSafe() {
+    default boolean supportsParallelism() {
         final ObjList<Function> args = getArgs();
         for (int i = 0, n = args.size(); i < n; i++) {
             final Function function = args.getQuick(i);
-            if (!function.isReadThreadSafe()) {
+            if (!function.supportsParallelism()) {
                 return false;
             }
         }
         return true;
+    }
+
+    @Override
+    default void toPlan(PlanSink sink) {
+        sink.val(getName()).val('(').val(getArgs()).val(')');
+    }
+
+    @Override
+    default void toTop() {
+        GroupByUtils.toTop(getArgs());
     }
 }

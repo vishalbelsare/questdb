@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,27 +27,23 @@ package io.questdb.cairo;
 
 import io.questdb.NullIndexFrameCursor;
 import io.questdb.cairo.sql.RowCursor;
+import io.questdb.std.str.Path;
 
 public class BitmapIndexFwdNullReader implements BitmapIndexReader {
-
     private final NullCursor cursor = new NullCursor();
 
     @Override
     public RowCursor getCursor(boolean cachedInstance, int key, long minValue, long maxValue) {
         final NullCursor cursor = getCursor(cachedInstance);
-        cursor.max = maxValue + 1;
+        // Cursor only returns records when key is for the NULL value
+        cursor.maxValue = key == 0 ? maxValue - minValue + 1 : 0;
         cursor.value = 0;
         return cursor;
     }
 
     @Override
-    public int getKeyCount() {
-        return 1;
-    }
-
-    @Override
-    public boolean isOpen() {
-        return true;
+    public IndexFrameCursor getFrameCursor(int key, long minValue, long maxValue) {
+        return NullIndexFrameCursor.INSTANCE;
     }
 
     @Override
@@ -56,17 +52,12 @@ public class BitmapIndexFwdNullReader implements BitmapIndexReader {
     }
 
     @Override
+    public int getKeyCount() {
+        return 1;
+    }
+
+    @Override
     public long getKeyMemorySize() {
-        return 0;
-    }
-
-    @Override
-    public long getValueBaseAddress() {
-        return 0;
-    }
-
-    @Override
-    public long getValueMemorySize() {
         return 0;
     }
 
@@ -76,26 +67,40 @@ public class BitmapIndexFwdNullReader implements BitmapIndexReader {
     }
 
     @Override
+    public long getValueBaseAddress() {
+        return 0;
+    }
+
+    @Override
     public int getValueBlockCapacity() {
         return 0;
+    }
+
+    @Override
+    public long getValueMemorySize() {
+        return 0;
+    }
+
+    @Override
+    public boolean isOpen() {
+        return true;
+    }
+
+    @Override
+    public void of(CairoConfiguration configuration, Path path, CharSequence name, long columnNameTxn, long unIndexedNullCount) {
     }
 
     private NullCursor getCursor(boolean cachedInstance) {
         return cachedInstance ? cursor : new NullCursor();
     }
 
-    @Override
-    public IndexFrameCursor getFrameCursor(int key, long minValue, long maxValue) {
-        return NullIndexFrameCursor.INSTANCE;
-    }
-
     private static class NullCursor implements RowCursor {
-        private long max;
+        private long maxValue;
         private long value;
 
         @Override
         public boolean hasNext() {
-            return value < max;
+            return value < maxValue;
         }
 
         @Override

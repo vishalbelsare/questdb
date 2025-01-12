@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,20 +24,23 @@
 
 package io.questdb.griffin.engine.table;
 
+import io.questdb.cairo.AbstractRecordCursorFactory;
+import io.questdb.cairo.TableToken;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.Misc;
 
-public class FilteredRecordCursorFactory implements RecordCursorFactory {
+public class FilteredRecordCursorFactory extends AbstractRecordCursorFactory {
     private final RecordCursorFactory base;
     private final FilteredRecordCursor cursor;
     private final Function filter;
 
     public FilteredRecordCursorFactory(RecordCursorFactory base, Function filter) {
+        super(base.getMetadata());
         assert !(base instanceof FilteredRecordCursorFactory);
         this.base = base;
         this.cursor = new FilteredRecordCursor(filter);
@@ -45,9 +48,8 @@ public class FilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public void close() {
-        base.close();
-        filter.close();
+    public RecordCursorFactory getBaseFactory() {
+        return base;
     }
 
     @Override
@@ -63,8 +65,8 @@ public class FilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return base.getMetadata();
+    public int getScanDirection() {
+        return base.getScanDirection();
     }
 
     @Override
@@ -73,8 +75,15 @@ public class FilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public boolean supportsUpdateRowId(CharSequence tableName) {
-        return base.supportsUpdateRowId(tableName);
+    public boolean supportsUpdateRowId(TableToken tableToken) {
+        return base.supportsUpdateRowId(tableToken);
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Filter");
+        sink.meta("filter").val(filter);
+        sink.child(base);
     }
 
     @Override
@@ -83,7 +92,13 @@ public class FilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public boolean hasDescendingOrder() {
-        return base.hasDescendingOrder();
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
+
+    @Override
+    protected void _close() {
+        base.close();
+        filter.close();
     }
 }

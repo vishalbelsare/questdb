@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 package io.questdb.griffin;
 
 import io.questdb.cairo.ColumnType;
+import io.questdb.std.IntObjHashMap;
 import io.questdb.std.Misc;
 import io.questdb.std.str.StringSink;
 
@@ -32,10 +33,11 @@ public class FunctionFactoryDescriptor {
     private static final int ARRAY_MASK = 1 << 31;
     private static final int CONST_MASK = 1 << 30;
     private static final int TYPE_MASK = ~(ARRAY_MASK | CONST_MASK);
-    private final FunctionFactory factory;
+    private static final IntObjHashMap<String> typeNameMap = new IntObjHashMap<>();
     private final long[] argTypes;
-    private final int sigArgCount;
+    private final FunctionFactory factory;
     private final int openBraceIndex;
+    private final int sigArgCount;
 
     public FunctionFactoryDescriptor(FunctionFactory factory) throws SqlException {
         this.factory = factory;
@@ -87,10 +89,6 @@ public class FunctionFactoryDescriptor {
         }
         this.argTypes = types;
         this.sigArgCount = typeCount;
-    }
-
-    private static long toUnsignedLong(int type) {
-        return ((long) type) & 0xffffffffL;
     }
 
     public static int getArgType(char c) {
@@ -153,6 +151,30 @@ public class FunctionFactoryDescriptor {
             case 'o':
                 sigArgType = ColumnType.NULL;
                 break;
+            case 'p':
+                sigArgType = ColumnType.REGCLASS;
+                break;
+            case 'q':
+                sigArgType = ColumnType.REGPROCEDURE;
+                break;
+            case 'w':
+                sigArgType = ColumnType.ARRAY_STRING;
+                break;
+            case 'j':
+                sigArgType = ColumnType.LONG128;
+                break;
+            case 'z':
+                sigArgType = ColumnType.UUID;
+                break;
+            case 'x':
+                sigArgType = ColumnType.IPv4;
+                break;
+            case 'ø':
+                sigArgType = ColumnType.VARCHAR;
+                break;
+            case 'δ':
+                sigArgType = ColumnType.INTERVAL;
+                break;
             default:
                 sigArgType = -1;
                 break;
@@ -168,8 +190,67 @@ public class FunctionFactoryDescriptor {
         return (mask & CONST_MASK) != 0;
     }
 
+    public static String replaceSignatureName(String name, String signature) throws SqlException {
+        int openBraceIndex = validateSignatureAndGetNameSeparator(signature);
+        StringSink signatureBuilder = Misc.getThreadLocalSink();
+        signatureBuilder.put(name);
+        signatureBuilder.put(signature, openBraceIndex, signature.length());
+        return signatureBuilder.toString();
+    }
+
+    public static String replaceSignatureNameAndSwapArgs(String name, String signature) throws SqlException {
+        int openBraceIndex = validateSignatureAndGetNameSeparator(signature);
+        StringSink signatureBuilder = Misc.getThreadLocalSink();
+        signatureBuilder.put(name);
+        signatureBuilder.put('(');
+        for (int i = signature.length() - 2; i > openBraceIndex; i--) {
+            char curr = signature.charAt(i);
+            if (curr == '[') {
+                signatureBuilder.put("[]");
+            } else if (curr != ']') {
+                signatureBuilder.put(curr);
+            }
+        }
+        signatureBuilder.put(')');
+        return signatureBuilder.toString();
+    }
+
     public static short toType(int mask) {
         return (short) (mask & TYPE_MASK);
+    }
+
+    public static StringSink translateSignature(CharSequence funcName, String signature, StringSink sink) {
+        int openBraceIndex;
+        try {
+            openBraceIndex = validateSignatureAndGetNameSeparator(signature);
+        } catch (SqlException err) {
+            throw new IllegalArgumentException("offending: '" + signature + "', reason: " + err.getMessage());
+        }
+        sink.put(funcName).put('(');
+        for (int i = openBraceIndex + 1, n = signature.length() - 1; i < n; i++) {
+            char c = signature.charAt(i);
+            String type = typeNameMap.get(c | 32);
+            if (type == null) {
+                throw new IllegalArgumentException("offending: '" + c + '\'');
+            }
+            if (c != '[') {
+                if (Character.isLowerCase(c)) {
+                    sink.put("const ");
+                }
+            } else {
+                if (i < 3 || i + 2 > n || signature.charAt(i + 1) != ']') {
+                    throw new IllegalArgumentException("offending array: '" + c + '\'');
+                }
+                sink.clear(sink.length() - 2); // remove the preceding comma
+                i++; // skip closing bracket
+            }
+            sink.put(type);
+            if (i + 1 < n) {
+                sink.put(", ");
+            }
+        }
+        sink.put(')');
+        return sink;
     }
 
     public static int validateSignatureAndGetNameSeparator(String sig) throws SqlException {
@@ -208,31 +289,6 @@ public class FunctionFactoryDescriptor {
         return openBraceIndex;
     }
 
-    public static String replaceSignatureNameAndSwapArgs(String name, String signature) throws SqlException {
-        int openBraceIndex = validateSignatureAndGetNameSeparator(signature);
-        StringSink signatureBuilder = Misc.getThreadLocalBuilder();
-        signatureBuilder.put(name);
-        signatureBuilder.put('(');
-        for (int i = signature.length() - 2; i > openBraceIndex; i--) {
-            char curr = signature.charAt(i);
-            if (curr == '[') {
-                signatureBuilder.put("[]");
-            } else if (curr != ']') {
-                signatureBuilder.put(curr);
-            }
-        }
-        signatureBuilder.put(')');
-        return signatureBuilder.toString();
-    }
-
-    public static String replaceSignatureName(String name, String signature) throws SqlException {
-        int openBraceIndex = validateSignatureAndGetNameSeparator(signature);
-        StringSink signatureBuilder = Misc.getThreadLocalBuilder();
-        signatureBuilder.put(name);
-        signatureBuilder.put(signature, openBraceIndex, signature.length());
-        return signatureBuilder.toString();
-    }
-
     public int getArgTypeMask(int index) {
         int arrayIndex = index / 2;
         long mask = argTypes[arrayIndex];
@@ -249,5 +305,40 @@ public class FunctionFactoryDescriptor {
 
     public int getSigArgCount() {
         return sigArgCount;
+    }
+
+    private static long toUnsignedLong(int type) {
+        return ((long) type) & 0xffffffffL;
+    }
+
+    static {
+        typeNameMap.put('d', "double");
+        typeNameMap.put('b', "byte");
+        typeNameMap.put('e', "short");
+        typeNameMap.put('a', "char");
+        typeNameMap.put('f', "float");
+        typeNameMap.put('i', "int");
+        typeNameMap.put('l', "long");
+        typeNameMap.put('s', "string");
+        typeNameMap.put('t', "boolean");
+        typeNameMap.put('k', "symbol");
+        typeNameMap.put('m', "date");
+        typeNameMap.put('n', "timestamp");
+        typeNameMap.put('u', "binary");
+        typeNameMap.put('v', "var_arg");
+        typeNameMap.put('c', "cursor");
+        typeNameMap.put('r', "record");
+        typeNameMap.put('h', "long256");
+        typeNameMap.put('g', "geohash");
+        typeNameMap.put('o', "null");
+        typeNameMap.put('p', "reg_class");
+        typeNameMap.put('q', "reg_procedure");
+        typeNameMap.put('w', "array_string");
+        typeNameMap.put('j', "long128");
+        typeNameMap.put('z', "uuid");
+        typeNameMap.put('x', "ipv4");
+        typeNameMap.put('ø', "varchar");
+        typeNameMap.put('δ', "interval");
+        typeNameMap.put('[' | 32, "[]");
     }
 }

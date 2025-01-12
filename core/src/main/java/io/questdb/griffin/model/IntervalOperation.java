@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,14 +25,11 @@
 package io.questdb.griffin.model;
 
 public final class IntervalOperation {
-    public static final short NONE = 0;
-
     public static final short INTERSECT = 1;
     public static final short INTERSECT_BETWEEN = 3;
     public static final short INTERSECT_INTERVALS = 4;
-
     public static final short NEGATED_BORDERLINE = 4;
-
+    public static final short NONE = 0;
     public static final short SUBTRACT = 5;
     public static final short SUBTRACT_BETWEEN = 6;
     public static final short SUBTRACT_INTERVALS = 7;

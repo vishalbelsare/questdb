@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,207 +24,185 @@
 
 package io.questdb.cutlass.pgwire;
 
+import io.questdb.FactoryProvider;
 import io.questdb.Metrics;
-import io.questdb.WorkerPoolAwareConfiguration;
 import io.questdb.cairo.CairoEngine;
-import io.questdb.griffin.DatabaseSnapshotAgent;
-import io.questdb.griffin.FunctionFactoryCache;
+import io.questdb.cairo.sql.NetworkSqlExecutionCircuitBreaker;
+import io.questdb.cutlass.auth.SocketAuthenticator;
 import io.questdb.griffin.SqlExecutionContextImpl;
 import io.questdb.log.Log;
 import io.questdb.log.LogFactory;
-import io.questdb.mp.*;
-import io.questdb.network.*;
+import io.questdb.mp.Job;
+import io.questdb.mp.WorkerPool;
+import io.questdb.network.IOContextFactoryImpl;
+import io.questdb.network.IODispatcher;
+import io.questdb.network.IODispatchers;
+import io.questdb.network.IOOperation;
+import io.questdb.network.IORequestProcessor;
+import io.questdb.network.PeerDisconnectedException;
+import io.questdb.network.PeerIsSlowToReadException;
+import io.questdb.network.PeerIsSlowToWriteException;
+import io.questdb.network.QueryPausedException;
+import io.questdb.std.AssociativeCache;
+import io.questdb.std.ConcurrentAssociativeCache;
+import io.questdb.std.MemoryTag;
 import io.questdb.std.Misc;
-import io.questdb.std.ThreadLocal;
-import io.questdb.std.WeakMutableObjectPool;
-import org.jetbrains.annotations.Nullable;
-
-import java.io.Closeable;
+import io.questdb.std.NoOpAssociativeCache;
+import io.questdb.std.ObjectFactory;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.TestOnly;
 
 import static io.questdb.network.IODispatcher.*;
 
-public class PGWireServer implements Closeable {
-
+public class PGWireServer implements IPGWireServer {
     private static final Log LOG = LogFactory.getLog(PGWireServer.class);
-
-    private final IODispatcher<PGConnectionContext> dispatcher;
+    private static final NoOpAssociativeCache<TypesAndSelect> NO_OP_CACHE = new NoOpAssociativeCache<>();
     private final PGConnectionContextFactory contextFactory;
+    private final IODispatcher<PGConnectionContext> dispatcher;
+    private final Metrics metrics;
+    private final CircuitBreakerRegistry registry;
     private final WorkerPool workerPool;
+    private AssociativeCache<TypesAndSelect> typesAndSelectCache;
 
     public PGWireServer(
             PGWireConfiguration configuration,
             CairoEngine engine,
             WorkerPool workerPool,
-            boolean workerPoolLocal,
-            FunctionFactoryCache functionFactoryCache,
-            DatabaseSnapshotAgent snapshotAgent,
-            PGConnectionContextFactory contextFactory
+            CircuitBreakerRegistry registry,
+            ObjectFactory<SqlExecutionContextImpl> executionContextObjectFactory
     ) {
-        this.contextFactory = contextFactory;
-        this.dispatcher = IODispatchers.create(
-                configuration.getDispatcherConfiguration(),
-                contextFactory
+        this.metrics = engine.getMetrics();
+        if (configuration.isSelectCacheEnabled()) {
+            this.typesAndSelectCache = new ConcurrentAssociativeCache<>(configuration.getConcurrentCacheConfiguration());
+        } else {
+            this.typesAndSelectCache = NO_OP_CACHE;
+        }
+        this.contextFactory = new PGConnectionContextFactory(
+                engine,
+                configuration,
+                registry,
+                executionContextObjectFactory,
+                typesAndSelectCache
         );
+        this.dispatcher = IODispatchers.create(configuration, contextFactory);
+        this.workerPool = workerPool;
+        this.registry = registry;
 
         workerPool.assign(dispatcher);
 
         for (int i = 0, n = workerPool.getWorkerCount(); i < n; i++) {
-            final PGJobContext jobContext = new PGJobContext(configuration, engine, functionFactoryCache, snapshotAgent);
-
-            final SCSequence queryCacheEventSubSeq = new SCSequence();
-            final FanOut queryCacheEventFanOut = engine.getMessageBus().getQueryCacheEventFanOut();
-            queryCacheEventFanOut.and(queryCacheEventSubSeq);
-
             workerPool.assign(i, new Job() {
-                private final IORequestProcessor<PGConnectionContext> processor = (operation, context) -> {
+                private final IORequestProcessor<PGConnectionContext> processor = (operation, context, dispatcher) -> {
                     try {
-                        jobContext.handleClientOperation(context, operation);
-                        context.getDispatcher().registerChannel(context, IOOperation.READ);
+                        if (operation == IOOperation.HEARTBEAT) {
+                            dispatcher.registerChannel(context, IOOperation.HEARTBEAT);
+                            return false;
+                        }
+                        context.handleClientOperation(operation);
+                        dispatcher.registerChannel(context, IOOperation.READ);
+                        return true;
                     } catch (PeerIsSlowToWriteException e) {
-                        context.getDispatcher().registerChannel(context, IOOperation.READ);
+                        dispatcher.registerChannel(context, IOOperation.READ);
                     } catch (PeerIsSlowToReadException e) {
-                        context.getDispatcher().registerChannel(context, IOOperation.WRITE);
+                        dispatcher.registerChannel(context, IOOperation.WRITE);
+                    } catch (QueryPausedException e) {
+                        context.setSuspendEvent(e.getEvent());
+                        dispatcher.registerChannel(context, IOOperation.WRITE);
                     } catch (PeerDisconnectedException e) {
-                        context.getDispatcher().disconnect(context, operation == IOOperation.READ ? DISCONNECT_REASON_PEER_DISCONNECT_AT_RECV : DISCONNECT_REASON_PEER_DISCONNECT_AT_SEND);
+                        dispatcher.disconnect(
+                                context,
+                                operation == IOOperation.READ
+                                        ? DISCONNECT_REASON_PEER_DISCONNECT_AT_RECV
+                                        : DISCONNECT_REASON_PEER_DISCONNECT_AT_SEND
+                        );
                     } catch (BadProtocolException e) {
-                        context.getDispatcher().disconnect(context, DISCONNECT_REASON_PROTOCOL_VIOLATION);
-                    } catch (Throwable e) {//must remain last in catch list!
-                        LOG.error().$(e).$();
-                        context.getDispatcher().disconnect(context, DISCONNECT_REASON_SERVER_ERROR);
+                        dispatcher.disconnect(context, DISCONNECT_REASON_PROTOCOL_VIOLATION);
+                    } catch (Throwable e) { // must remain last in catch list!
+                        LOG.critical().$("internal error [ex=").$(e).$(']').$();
+                        // This is a critical error, so we treat it as an unhandled one.
+                        metrics.healthMetrics().incrementUnhandledErrors();
+                        dispatcher.disconnect(context, DISCONNECT_REASON_SERVER_ERROR);
                     }
+                    return false;
                 };
 
                 @Override
-                public boolean run(int workerId) {
-                    long seq = queryCacheEventSubSeq.next();
-                    if (seq > -1) {
-                        // Queue is not empty, so flush query cache.
-                        LOG.info().$("flushing PG Wire query cache [worker=").$(workerId).$(']').$();
-                        jobContext.flushQueryCache();
-                        queryCacheEventSubSeq.done(seq);
-                    }
+                public boolean run(int workerId, @NotNull RunStatus runStatus) {
                     return dispatcher.processIOQueue(processor);
                 }
             });
 
-            // http context factory has thread local pools
+            // context factory has thread local pools
             // therefore we need each thread to clean their thread locals individually
-            workerPool.assign(i, () -> {
-                Misc.free(jobContext);
-                contextFactory.closeContextPool();
-                engine.getMessageBus().getQueryCacheEventFanOut().remove(queryCacheEventSubSeq);
-                queryCacheEventSubSeq.clear();
-            });
-        }
-
-        if (workerPoolLocal) {
-            this.workerPool = workerPool;
-        } else {
-            this.workerPool = null;
+            workerPool.assignThreadLocalCleaner(i, contextFactory::freeThreadLocal);
         }
     }
 
-    @Nullable
-    public static PGWireServer create(
-            PGWireConfiguration configuration,
-            WorkerPool sharedWorkerPool,
-            Log log,
-            CairoEngine cairoEngine,
-            FunctionFactoryCache functionFactoryCache,
-            DatabaseSnapshotAgent snapshotAgent,
-            Metrics metrics,
-            PGConnectionContextFactory contextFactory
-    ) {
-        return WorkerPoolAwareConfiguration.create(
-                configuration,
-                sharedWorkerPool,
-                log,
-                cairoEngine,
-                (conf, engine, workerPool, local, functionFactoryCache1, snapshotAgent1, metrics1) -> new PGWireServer(
-                        conf, engine, workerPool, local, functionFactoryCache1, snapshotAgent1, contextFactory
-                ),
-                functionFactoryCache,
-                snapshotAgent,
-                metrics
-        );
-    }
-
-    @Nullable
-    public static PGWireServer create(
-            PGWireConfiguration configuration,
-            WorkerPool sharedWorkerPool,
-            Log log,
-            CairoEngine cairoEngine,
-            FunctionFactoryCache functionFactoryCache,
-            DatabaseSnapshotAgent snapshotAgent,
-            Metrics metrics
-    ) {
-        return WorkerPoolAwareConfiguration.create(
-                configuration,
-                sharedWorkerPool,
-                log,
-                cairoEngine,
-                (conf, engine, workerPool, local, functionFactoryCache1, snapshotAgent1, metrics1) -> {
-                    PGConnectionContextFactory contextFactory = new PGConnectionContextFactory(engine, conf, workerPool.getWorkerCount());
-                    return new PGWireServer(conf, engine, workerPool, local, functionFactoryCache1, snapshotAgent1, contextFactory);
-                },
-                functionFactoryCache,
-                snapshotAgent,
-                metrics
-        );
+    @Override
+    public void clearSelectCache() {
+        typesAndSelectCache.clear();
     }
 
     @Override
     public void close() {
-        // worker pool will only be set if it is "local"
-        if (workerPool != null) {
-            workerPool.halt();
-        }
-        Misc.free(contextFactory);
         Misc.free(dispatcher);
+        Misc.free(registry);
+        Misc.free(contextFactory);
+        typesAndSelectCache = Misc.free(typesAndSelectCache);
     }
 
-    public static class PGConnectionContextFactory implements IOContextFactory<PGConnectionContext>, Closeable, EagerThreadSetup {
-        private final ThreadLocal<WeakMutableObjectPool<PGConnectionContext>> contextPool;
-        private boolean closed = false;
+    @Override
+    public int getPort() {
+        return dispatcher.getPort();
+    }
 
-        public PGConnectionContextFactory(CairoEngine engine, PGWireConfiguration configuration, int workerCount) {
-            this.contextPool = new ThreadLocal<>(() -> new WeakMutableObjectPool<>(() ->
-                    new PGConnectionContext(engine, configuration, getSqlExecutionContext(engine, workerCount)), configuration.getConnectionPoolInitialCapacity()));
+    @TestOnly
+    @Override
+    public WorkerPool getWorkerPool() {
+        return workerPool;
+    }
+
+    @Override
+    public void resetQueryCache() {
+        if (typesAndSelectCache != null) {
+            typesAndSelectCache.clear();
         }
+    }
 
-        protected SqlExecutionContextImpl getSqlExecutionContext(CairoEngine engine, int workerCount) {
-            return new SqlExecutionContextImpl(engine, workerCount);
-        }
+    private static class PGConnectionContextFactory extends IOContextFactoryImpl<PGConnectionContext> {
 
-        @Override
-        public void close() {
-            closed = true;
-        }
-
-        @Override
-        public PGConnectionContext newInstance(long fd, IODispatcher<PGConnectionContext> dispatcher) {
-            return contextPool.get().pop().of(fd, dispatcher);
-        }
-
-        @Override
-        public void done(PGConnectionContext context) {
-            if (closed) {
-                Misc.free(context);
-            } else {
-                contextPool.get().push(context);
-                LOG.debug().$("pushed").$();
-            }
-        }
-
-        @Override
-        public void setup() {
-            contextPool.get();
-        }
-
-        private void closeContextPool() {
-            Misc.free(this.contextPool.get());
-            LOG.info().$("closed").$();
+        public PGConnectionContextFactory(
+                CairoEngine engine,
+                PGWireConfiguration configuration,
+                CircuitBreakerRegistry registry,
+                ObjectFactory<SqlExecutionContextImpl> executionContextObjectFactory,
+                AssociativeCache<TypesAndSelect> typesAndSelectCache
+        ) {
+            super(
+                    () -> {
+                        NetworkSqlExecutionCircuitBreaker circuitBreaker = new NetworkSqlExecutionCircuitBreaker(
+                                configuration.getCircuitBreakerConfiguration(),
+                                MemoryTag.NATIVE_CB5
+                        );
+                        PGConnectionContext pgConnectionContext = new PGConnectionContext(
+                                engine,
+                                configuration,
+                                executionContextObjectFactory.newInstance(),
+                                circuitBreaker,
+                                typesAndSelectCache
+                        );
+                        FactoryProvider factoryProvider = configuration.getFactoryProvider();
+                        SocketAuthenticator authenticator = factoryProvider.getPgWireAuthenticatorFactory().getPgWireAuthenticator(
+                                configuration,
+                                circuitBreaker,
+                                registry,
+                                pgConnectionContext
+                        );
+                        pgConnectionContext.setAuthenticator(authenticator);
+                        return pgConnectionContext;
+                    },
+                    configuration.getConnectionPoolInitialCapacity()
+            );
         }
     }
 }

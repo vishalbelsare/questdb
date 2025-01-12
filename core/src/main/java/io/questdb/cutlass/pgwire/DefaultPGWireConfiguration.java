@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,36 +24,27 @@
 
 package io.questdb.cutlass.pgwire;
 
+import io.questdb.DefaultFactoryProvider;
+import io.questdb.FactoryProvider;
 import io.questdb.cairo.sql.SqlExecutionCircuitBreakerConfiguration;
 import io.questdb.griffin.DefaultSqlExecutionCircuitBreakerConfiguration;
 import io.questdb.network.DefaultIODispatcherConfiguration;
-import io.questdb.network.IODispatcherConfiguration;
-import io.questdb.network.NetworkFacade;
-import io.questdb.network.NetworkFacadeImpl;
+import io.questdb.std.ConcurrentCacheConfiguration;
+import io.questdb.std.DefaultConcurrentCacheConfiguration;
 import io.questdb.std.datetime.DateLocale;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
 
-public class DefaultPGWireConfiguration implements PGWireConfiguration {
-
-    private final IODispatcherConfiguration ioDispatcherConfiguration = new DefaultIODispatcherConfiguration() {
-        @Override
-        public int getBindPort() {
-            return 8812;
-        }
-
-        @Override
-        public String getDispatcherLogName() {
-            return "pg-server";
-        }
-    };
-
+public class DefaultPGWireConfiguration extends DefaultIODispatcherConfiguration implements PGWireConfiguration {
     private final SqlExecutionCircuitBreakerConfiguration circuitBreakerConfiguration = new DefaultSqlExecutionCircuitBreakerConfiguration();
-
-    private final int[] workerAffinity = new int[]{-1};
 
     @Override
     public int getBinParamCountCapacity() {
         return 4;
+    }
+
+    @Override
+    public int getBindPort() {
+        return 8812;
     }
 
     @Override
@@ -67,8 +58,23 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
+    public SqlExecutionCircuitBreakerConfiguration getCircuitBreakerConfiguration() {
+        return circuitBreakerConfiguration;
+    }
+
+    @Override
+    public ConcurrentCacheConfiguration getConcurrentCacheConfiguration() {
+        return DefaultConcurrentCacheConfiguration.DEFAULT;
+    }
+
+    @Override
     public int getConnectionPoolInitialCapacity() {
-        return 64;
+        return 4;
+    }
+
+    @Override
+    public DateLocale getDefaultDateLocale() {
+        return DateFormatUtils.EN_LOCALE;
     }
 
     @Override
@@ -82,63 +88,33 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
-    public boolean readOnlySecurityContext() {
-        return false;
+    public String getDispatcherLogName() {
+        return "pg-server";
     }
 
     @Override
-    public IODispatcherConfiguration getDispatcherConfiguration() {
-        return ioDispatcherConfiguration;
+    public FactoryProvider getFactoryProvider() {
+        return DefaultFactoryProvider.INSTANCE;
     }
 
     @Override
-    public boolean isSelectCacheEnabled() {
-        return true;
+    public int getForceRecvFragmentationChunkSize() {
+        return Integer.MAX_VALUE;
     }
 
     @Override
-    public int getSelectCacheBlockCount() {
-        return 16;
-    }
-
-    @Override
-    public int getSelectCacheRowCount() {
-        return 16;
-    }
-
-    @Override
-    public boolean isInsertCacheEnabled() {
-        return true;
+    public int getForceSendFragmentationChunkSize() {
+        return Integer.MAX_VALUE;
     }
 
     @Override
     public int getInsertCacheBlockCount() {
-        return 8;
+        return 4;
     }
 
     @Override
     public int getInsertCacheRowCount() {
-        return 8;
-    }
-
-    @Override
-    public int getInsertPoolCapacity() {
-        return 32;
-    }
-
-    @Override
-    public boolean isUpdateCacheEnabled() {
-        return true;
-    }
-
-    @Override
-    public int getUpdateCacheBlockCount() {
-        return 8;
-    }
-
-    @Override
-    public int getUpdateCacheRowCount() {
-        return 8;
+        return 4;
     }
 
     @Override
@@ -153,18 +129,33 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
+    public int getNamedStatementLimit() {
+        return 10_000;
+    }
+
+    @Override
     public int getNamesStatementPoolCapacity() {
         return 32;
     }
 
     @Override
-    public NetworkFacade getNetworkFacade() {
-        return NetworkFacadeImpl.INSTANCE;
+    public int getPendingWritersCacheSize() {
+        return 16;
     }
 
     @Override
-    public int getPendingWritersCacheSize() {
-        return 16;
+    public String getPoolName() {
+        return "pgwire";
+    }
+
+    @Override
+    public String getReadOnlyPassword() {
+        return "quest";
+    }
+
+    @Override
+    public String getReadOnlyUsername() {
+        return "user";
     }
 
     @Override
@@ -183,18 +174,13 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
-    public DateLocale getDefaultDateLocale() {
-        return DateFormatUtils.enLocale;
+    public int getUpdateCacheBlockCount() {
+        return 4;
     }
 
     @Override
-    public SqlExecutionCircuitBreakerConfiguration getCircuitBreakerConfiguration() {
-        return circuitBreakerConfiguration;
-    }
-
-    @Override
-    public int[] getWorkerAffinity() {
-        return workerAffinity;
+    public int getUpdateCacheRowCount() {
+        return 4;
     }
 
     @Override
@@ -203,12 +189,32 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
-    public boolean haltOnError() {
+    public boolean isInsertCacheEnabled() {
+        return true;
+    }
+
+    @Override
+    public boolean isLegacyModeEnabled() {
         return false;
     }
 
     @Override
-    public boolean isEnabled() {
+    public boolean isReadOnlyUserEnabled() {
+        return false;
+    }
+
+    @Override
+    public boolean isSelectCacheEnabled() {
         return true;
+    }
+
+    @Override
+    public boolean isUpdateCacheEnabled() {
+        return true;
+    }
+
+    @Override
+    public boolean readOnlySecurityContext() {
+        return false;
     }
 }

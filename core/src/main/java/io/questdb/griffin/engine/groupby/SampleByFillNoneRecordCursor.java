@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,117 +24,170 @@
 
 package io.questdb.griffin.engine.groupby;
 
+import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.RecordSink;
 import io.questdb.cairo.map.Map;
 import io.questdb.cairo.map.MapKey;
 import io.questdb.cairo.map.MapValue;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.RecordCursor;
+import io.questdb.griffin.SqlException;
+import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.std.ObjList;
 
 class SampleByFillNoneRecordCursor extends AbstractVirtualRecordSampleByCursor {
-    private final Map map;
     private final RecordSink keyMapSink;
+    private final Map map;
     private final RecordCursor mapCursor;
+    private boolean isHasNextPending;
+    private boolean isMapBuildPending;
+    private boolean isOpen;
+    private long rowId;
 
     public SampleByFillNoneRecordCursor(
+            CairoConfiguration configuration,
             Map map,
             RecordSink keyMapSink,
             ObjList<GroupByFunction> groupByFunctions,
+            GroupByFunctionsUpdater groupByFunctionsUpdater,
             ObjList<Function> recordFunctions,
             int timestampIndex, // index of timestamp column in base cursor
             TimestampSampler timestampSampler,
             Function timezoneNameFunc,
             int timezoneNameFuncPos,
             Function offsetFunc,
-            int offsetFuncPos
+            int offsetFuncPos,
+            Function sampleFromFunc,
+            int sampleFromFuncPos,
+            Function sampleToFunc,
+            int sampleToFuncPos
     ) {
         super(
+                configuration,
                 recordFunctions,
                 timestampIndex,
                 timestampSampler,
                 groupByFunctions,
+                groupByFunctionsUpdater,
                 timezoneNameFunc,
                 timezoneNameFuncPos,
                 offsetFunc,
-                offsetFuncPos
+                offsetFuncPos,
+                sampleFromFunc,
+                sampleFromFuncPos,
+                sampleToFunc,
+                sampleToFuncPos
         );
         this.map = map;
         this.keyMapSink = keyMapSink;
-        this.record.of(map.getRecord());
-        this.mapCursor = map.getCursor();
+        record.of(map.getRecord());
+        mapCursor = map.getCursor();
+        isOpen = true;
+    }
+
+    @Override
+    public void close() {
+        if (isOpen) {
+            map.close();
+            super.close();
+            isOpen = false;
+        }
     }
 
     @Override
     public boolean hasNext() {
+        initTimestamps();
+
         if (mapCursor.hasNext()) {
             return true;
         }
 
         if (baseRecord == null) {
             return false;
-
         }
-        this.map.clear();
 
-        this.sampleLocalEpoch = this.localEpoch;
-        long next = timestampSampler.nextTimestamp(this.localEpoch);
+        buildMap();
 
-        // looks like we need to populate key map
-        // at the start of this loop 'lastTimestamp' will be set to timestamp
-        // of first record in base cursor
-        int n = groupByFunctions.size();
-        do {
-            long timestamp = getBaseRecordTimestamp();
-            if (timestamp < next) {
-                adjustDSTInFlight(timestamp - tzOffset);
-                final MapKey key = map.withKey();
-                keyMapSink.copy(baseRecord, key);
-                GroupByUtils.updateFunctions(groupByFunctions, n, key.createValue(), baseRecord);
-                circuitBreaker.statefulThrowExceptionIfTripped();
-            } else {
-                // map value is conditional and only required when clock goes back
-                // we override base method for when this happens
-                // see: updateValueWhenClockMovesBack()
-                timestamp = adjustDST(timestamp, n, null, next);
-                if (timestamp != Long.MIN_VALUE) {
-                    nextSamplePeriod(timestamp);
-                    return createMapCursor();
-                }
-            }
-        } while (base.hasNext());
+        return mapCursor.hasNext();
+    }
 
-        // we ran out of data, make sure hasNext() returns false at the next
-        // opportunity, after we stream map that is.
-        baseRecord = null;
-        return createMapCursor();
+    @Override
+    public void of(RecordCursor base, SqlExecutionContext executionContext) throws SqlException {
+        super.of(base, executionContext);
+        if (!isOpen) {
+            isOpen = true;
+            map.reopen();
+        }
+        rowId = 0;
+        isHasNextPending = false;
+        isMapBuildPending = true;
     }
 
     @Override
     public void toTop() {
         super.toTop();
-        if (base.hasNext()) {
-            baseRecord = base.getRecord();
+        rowId = 0;
+        isHasNextPending = false;
+        isMapBuildPending = true;
+    }
+
+    private void buildMap() {
+        if (isMapBuildPending) {
             map.clear();
+            sampleLocalEpoch = localEpoch;
+            isMapBuildPending = false;
         }
+
+        final long next = timestampSampler.nextTimestamp(localEpoch);
+        boolean baseHasNext = true;
+        while (baseHasNext) {
+            if (!isHasNextPending) {
+                long timestamp = getBaseRecordTimestamp();
+                if (timestamp < next) {
+                    circuitBreaker.statefulThrowExceptionIfTripped();
+
+                    adjustDstInFlight(timestamp - tzOffset);
+                    final MapKey key = map.withKey();
+                    keyMapSink.copy(baseRecord, key);
+                    MapValue value = key.createValue();
+                    if (value.isNew()) {
+                        groupByFunctionsUpdater.updateNew(value, baseRecord, rowId++);
+                    } else {
+                        groupByFunctionsUpdater.updateExisting(value, baseRecord, rowId++);
+                    }
+                } else {
+                    // map value is conditional and only required when clock goes back
+                    // we override base method for when this happens
+                    // see: updateValueWhenClockMovesBack()
+                    timestamp = adjustDst(timestamp, null, next);
+                    if (timestamp != Long.MIN_VALUE) {
+                        nextSamplePeriod(timestamp);
+                        // reset map iterator
+                        map.getCursor();
+                        isMapBuildPending = true;
+                        return;
+                    }
+                }
+            }
+
+            isHasNextPending = true;
+            baseHasNext = baseCursor.hasNext();
+            isHasNextPending = false;
+        }
+
+        // we ran out of data, make sure hasNext() returns false at the next
+        // opportunity, after we stream map that is.
+        baseRecord = null;
+        // reset map iterator
+        map.getCursor();
+        isMapBuildPending = true;
     }
 
     @Override
-    protected void updateValueWhenClockMovesBack(MapValue value, int n) {
+    protected void updateValueWhenClockMovesBack(MapValue value) {
         final MapKey key = map.withKey();
         keyMapSink.copy(baseRecord, key);
-        super.updateValueWhenClockMovesBack(key.createValue(), n);
-    }
-
-    private boolean createMapCursor() {
-        // reset map iterator
-        map.getCursor();
-        // we do not have any more data, let map take over
-        return mapHasNext();
-    }
-
-    private boolean mapHasNext() {
-        return mapCursor.hasNext();
+        super.updateValueWhenClockMovesBack(key.createValue());
     }
 }

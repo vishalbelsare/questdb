@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,28 +24,23 @@
 
 package io.questdb.griffin.engine.join;
 
-import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.sql.Record;
-import io.questdb.cairo.sql.RecordCursor;
-import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.Misc;
 
-public class LtJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactory {
-    private final RecordCursorFactory masterFactory;
-    private final RecordCursorFactory slaveFactory;
+public class LtJoinNoKeyRecordCursorFactory extends AbstractJoinRecordCursorFactory {
     private final LtJoinNoKeyJoinRecordCursor cursor;
 
     public LtJoinNoKeyRecordCursorFactory(
             RecordMetadata metadata,
             RecordCursorFactory masterFactory,
             RecordCursorFactory slaveFactory,
-            int columnSplit) {
-        super(metadata);
-        this.masterFactory = masterFactory;
-        this.slaveFactory = slaveFactory;
+            int columnSplit
+    ) {
+        super(metadata, null, masterFactory, slaveFactory);
         this.cursor = new LtJoinNoKeyJoinRecordCursor(
                 columnSplit,
                 NullRecordFactory.getInstance(slaveFactory.getMetadata()),
@@ -55,10 +50,8 @@ public class LtJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactory 
     }
 
     @Override
-    public void close() {
-        ((JoinRecordMetadata) getMetadata()).close();
-        masterFactory.close();
-        slaveFactory.close();
+    public boolean followedOrderByAdvice() {
+        return masterFactory.followedOrderByAdvice();
     }
 
     @Override
@@ -77,24 +70,40 @@ public class LtJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactory 
     }
 
     @Override
+    public int getScanDirection() {
+        return masterFactory.getScanDirection();
+    }
+
+    @Override
     public boolean recordCursorSupportsRandomAccess() {
         return false;
     }
 
     @Override
-    public boolean hasDescendingOrder() {
-        return masterFactory.hasDescendingOrder();
+    public void toPlan(PlanSink sink) {
+        sink.type("Lt Join");
+        sink.child(masterFactory);
+        sink.child(slaveFactory);
+    }
+
+    @Override
+    protected void _close() {
+        Misc.freeIfCloseable(getMetadata());
+        Misc.free(masterFactory);
+        Misc.free(slaveFactory);
     }
 
     private static class LtJoinNoKeyJoinRecordCursor extends AbstractJoinCursor {
-        private final OuterJoinRecord record;
         private final int masterTimestampIndex;
+        private final OuterJoinRecord record;
         private final int slaveTimestampIndex;
-        private Record masterRecord;
-        private Record slaveRecB;
-        private Record slaveRecA;
-        private long slaveTimestamp = Long.MIN_VALUE;
+        private boolean isMasterHasNextPending;
         private long latestSlaveRowID = Long.MIN_VALUE;
+        private boolean masterHasNext;
+        private Record masterRecord;
+        private Record slaveRecA;
+        private Record slaveRecB;
+        private long slaveTimestamp = Long.MIN_VALUE;
 
         public LtJoinNoKeyJoinRecordCursor(
                 int columnSplit,
@@ -109,62 +118,38 @@ public class LtJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactory 
         }
 
         @Override
+        public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, Counter counter) {
+            masterCursor.calculateSize(circuitBreaker, counter);
+        }
+
+        @Override
         public Record getRecord() {
             return record;
         }
 
         @Override
         public boolean hasNext() {
-            if (masterCursor.hasNext()) {
+            if (isMasterHasNextPending) {
+                masterHasNext = masterCursor.hasNext();
+                isMasterHasNextPending = false;
+            }
+            if (masterHasNext) {
                 // great, we have a record no matter what
                 final long masterTimestamp = masterRecord.getTimestamp(masterTimestampIndex);
+                if (masterTimestamp <= slaveTimestamp) {
+                    isMasterHasNextPending = true;
+                    return true;
+                }
                 nextSlave(masterTimestamp);
+                isMasterHasNextPending = true;
                 return true;
             }
             return false;
         }
 
-        private void nextSlave(long masterTimestamp) {
-            long slaveTimestamp = this.slaveTimestamp;
-            positionSlaveRecB();
-            // check where this record falls
-            if (slaveTimestamp <= masterTimestamp) {
-                overScrollSlave(masterTimestamp, slaveTimestamp);
-            }
-        }
-
-        private void positionSlaveRecB() {
-            if (this.latestSlaveRowID != Long.MIN_VALUE) {
-                record.hasSlave(true);
-                slaveCursor.recordAt(slaveRecB, latestSlaveRowID);
-            }
-        }
-
-        private void overScrollSlave(long masterTimestamp, long slaveTimestamp) {
-            latestSlaveRowID = slaveRecA.getRowId();
-            this.slaveTimestamp = slaveTimestamp;
-
-            // scroll slave down
-            while (true) {
-                if (slaveCursor.hasNext()) {
-                    slaveTimestamp = slaveRecA.getTimestamp(slaveTimestampIndex);
-                    if (slaveTimestamp < masterTimestamp) {
-                        record.hasSlave(true);
-                        slaveCursor.recordAt(slaveRecB, latestSlaveRowID);
-                        latestSlaveRowID = slaveRecA.getRowId();
-                        this.slaveTimestamp = slaveTimestamp;
-                    } else {
-                        latestSlaveRowID = slaveRecA.getRowId();
-                        this.slaveTimestamp = slaveTimestamp;
-                        break;
-                    }
-                } else {
-                    record.hasSlave(true);
-                    slaveCursor.recordAt(slaveRecB, latestSlaveRowID);
-                    this.slaveTimestamp = Long.MAX_VALUE;
-                    break;
-                }
-            }
+        @Override
+        public long size() {
+            return masterCursor.size();
         }
 
         @Override
@@ -174,23 +159,40 @@ public class LtJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactory 
             record.hasSlave(false);
             masterCursor.toTop();
             slaveCursor.toTop();
+            isMasterHasNextPending = true;
         }
 
-        @Override
-        public long size() {
-            return masterCursor.size();
+        private void nextSlave(long masterTimestamp) {
+            while (true) {
+                boolean slaveHasNext = slaveCursor.hasNext();
+                if (latestSlaveRowID != Long.MIN_VALUE) {
+                    record.hasSlave(true);
+                    slaveCursor.recordAt(slaveRecB, latestSlaveRowID);
+                }
+                if (slaveHasNext) {
+                    slaveTimestamp = slaveRecA.getTimestamp(slaveTimestampIndex);
+                    latestSlaveRowID = slaveRecA.getRowId();
+                    if (slaveTimestamp >= masterTimestamp) {
+                        break;
+                    }
+                } else {
+                    slaveTimestamp = Long.MAX_VALUE;
+                    break;
+                }
+            }
         }
 
         private void of(RecordCursor masterCursor, RecordCursor slaveCursor) {
-            slaveTimestamp = Long.MIN_VALUE;
-            latestSlaveRowID = Long.MIN_VALUE;
             this.masterCursor = masterCursor;
             this.slaveCursor = slaveCursor;
-            this.masterRecord = masterCursor.getRecord();
-            this.slaveRecA = slaveCursor.getRecord();
-            this.slaveRecB = slaveCursor.getRecordB();
+            slaveTimestamp = Long.MIN_VALUE;
+            latestSlaveRowID = Long.MIN_VALUE;
+            masterRecord = masterCursor.getRecord();
+            slaveRecA = slaveCursor.getRecord();
+            slaveRecB = slaveCursor.getRecordB();
             record.of(masterRecord, slaveRecB);
             record.hasSlave(false);
+            isMasterHasNextPending = true;
         }
     }
 }

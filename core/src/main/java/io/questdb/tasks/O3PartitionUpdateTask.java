@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,13 +27,12 @@ package io.questdb.tasks;
 import io.questdb.std.ObjectFactory;
 
 public class O3PartitionUpdateTask {
-    private long partitionTimestamp;
-    private long srcOooPartitionLo;
-    private long srcOooPartitionHi;
-    private long srcDataMax;
-    private boolean partitionMutates;
-
     public static final ObjectFactory<O3PartitionUpdateTask> CONSTRUCTOR = O3PartitionUpdateTask::new;
+    private boolean partitionMutates;
+    private long partitionTimestamp;
+    private long srcDataMax;
+    private long srcOooPartitionHi;
+    private long srcOooPartitionLo;
 
     public long getPartitionTimestamp() {
         return partitionTimestamp;

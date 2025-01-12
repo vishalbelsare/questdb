@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,19 +24,30 @@
 
 package io.questdb.cutlass.line.udp;
 
-import io.questdb.cairo.CairoSecurityContext;
-import io.questdb.cutlass.line.LineProtoTimestampAdapter;
+import io.questdb.cutlass.line.LineTimestampAdapter;
 import io.questdb.network.NetworkFacade;
 
 public interface LineUdpReceiverConfiguration {
 
-    int getCommitMode();
+    boolean getAutoCreateNewColumns();
+
+    boolean getAutoCreateNewTables();
 
     int getBindIPv4Address();
 
+    int getCommitMode();
+
     int getCommitRate();
 
+    short getDefaultColumnTypeForFloat();
+
+    short getDefaultColumnTypeForInteger();
+
+    int getDefaultPartitionBy();
+
     int getGroupIPv4Address();
+
+    int getMaxFileNameLength();
 
     int getMsgBufferSize();
 
@@ -48,21 +59,15 @@ public interface LineUdpReceiverConfiguration {
 
     int getReceiveBufferSize();
 
-    CairoSecurityContext getCairoSecurityContext();
+    LineTimestampAdapter getTimestampAdapter();
 
     boolean isEnabled();
 
     boolean isUnicast();
 
+    boolean isUseLegacyStringDefault();
+
     boolean ownThread();
 
     int ownThreadAffinity();
-
-    LineProtoTimestampAdapter getTimestampAdapter();
-
-    int getDefaultPartitionBy();
-
-    short getDefaultColumnTypeForFloat();
-
-    short getDefaultColumnTypeForInteger();
 }

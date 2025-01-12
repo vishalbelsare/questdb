@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -40,12 +40,12 @@ import static io.questdb.griffin.SqlCodeGenerator.GKK_HOUR_INT;
 public class MaxLongVectorAggregateFunction extends LongFunction implements VectorAggregateFunction {
 
     public static final LongBinaryOperator MAX = Math::max;
-    private final LongAccumulator max = new LongAccumulator(
-            MAX, Long.MIN_VALUE
-    );
     private final int columnIndex;
     private final DistinctFunc distinctFunc;
     private final KeyValueFunc keyValueFunc;
+    private final LongAccumulator max = new LongAccumulator(
+            MAX, Long.MIN_VALUE
+    );
     private int valueOffset;
 
     public MaxLongVectorAggregateFunction(int keyKind, int columnIndex, int workerCount) {
@@ -60,24 +60,39 @@ public class MaxLongVectorAggregateFunction extends LongFunction implements Vect
     }
 
     @Override
-    public void aggregate(long address, long addressSize, int columnSizeHint, int workerId) {
+    public void aggregate(long address, long frameRowCount, int workerId) {
         if (address != 0) {
-            max.accumulate(Vect.maxLong(address, addressSize / Long.BYTES));
+            max.accumulate(Vect.maxLong(address, frameRowCount));
         }
     }
 
     @Override
-    public void aggregate(long pRosti, long keyAddress, long valueAddress, long valueAddressSize, int columnSizeShr, int workerId) {
+    public boolean aggregate(long pRosti, long keyAddress, long valueAddress, long frameRowCount) {
         if (valueAddress == 0) {
-            distinctFunc.run(pRosti, keyAddress, valueAddressSize / Long.BYTES);
+            return distinctFunc.run(pRosti, keyAddress, frameRowCount);
         } else {
-            keyValueFunc.run(pRosti, keyAddress, valueAddress, valueAddressSize / Long.BYTES, valueOffset);
+            return keyValueFunc.run(pRosti, keyAddress, valueAddress, frameRowCount, valueOffset);
         }
+    }
+
+    @Override
+    public void clear() {
+        max.reset();
     }
 
     @Override
     public int getColumnIndex() {
         return columnIndex;
+    }
+
+    @Override
+    public long getLong(Record rec) {
+        return max.longValue();
+    }
+
+    @Override
+    public String getName() {
+        return "max";
     }
 
     @Override
@@ -91,8 +106,8 @@ public class MaxLongVectorAggregateFunction extends LongFunction implements Vect
     }
 
     @Override
-    public void merge(long pRostiA, long pRostiB) {
-        Rosti.keyedIntMaxLongMerge(pRostiA, pRostiB, valueOffset);
+    public boolean merge(long pRostiA, long pRostiB) {
+        return Rosti.keyedIntMaxLongMerge(pRostiA, pRostiB, valueOffset);
     }
 
     @Override
@@ -102,22 +117,7 @@ public class MaxLongVectorAggregateFunction extends LongFunction implements Vect
     }
 
     @Override
-    public void wrapUp(long pRosti) {
-        Rosti.keyedIntMaxLongWrapUp(pRosti, valueOffset, max.longValue());
-    }
-
-    @Override
-    public void clear() {
-        max.reset();
-    }
-
-    @Override
-    public long getLong(Record rec) {
-        return max.longValue();
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return false;
+    public boolean wrapUp(long pRosti) {
+        return Rosti.keyedIntMaxLongWrapUp(pRosti, valueOffset, max.longValue());
     }
 }

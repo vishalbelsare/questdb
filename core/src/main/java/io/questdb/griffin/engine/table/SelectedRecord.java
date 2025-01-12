@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,8 +27,10 @@ package io.questdb.griffin.engine.table;
 import io.questdb.cairo.sql.Record;
 import io.questdb.std.BinarySequence;
 import io.questdb.std.IntList;
+import io.questdb.std.Interval;
 import io.questdb.std.Long256;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
 
 class SelectedRecord implements Record {
     private final IntList columnCrossIndex;
@@ -79,8 +81,38 @@ class SelectedRecord implements Record {
     }
 
     @Override
+    public byte getGeoByte(int col) {
+        return base.getGeoByte(getColumnIndex(col));
+    }
+
+    @Override
+    public int getGeoInt(int col) {
+        return base.getGeoInt(getColumnIndex(col));
+    }
+
+    @Override
+    public long getGeoLong(int col) {
+        return base.getGeoLong(getColumnIndex(col));
+    }
+
+    @Override
+    public short getGeoShort(int col) {
+        return base.getGeoShort(getColumnIndex(col));
+    }
+
+    @Override
+    public int getIPv4(int col) {
+        return base.getIPv4(getColumnIndex(col));
+    }
+
+    @Override
     public int getInt(int col) {
         return base.getInt(getColumnIndex(col));
+    }
+
+    @Override
+    public Interval getInterval(int col) {
+        return base.getInterval(getColumnIndex(col));
     }
 
     @Override
@@ -89,7 +121,17 @@ class SelectedRecord implements Record {
     }
 
     @Override
-    public void getLong256(int col, CharSink sink) {
+    public long getLong128Hi(int col) {
+        return base.getLong128Hi(getColumnIndex(col));
+    }
+
+    @Override
+    public long getLong128Lo(int col) {
+        return base.getLong128Lo(getColumnIndex(col));
+    }
+
+    @Override
+    public void getLong256(int col, CharSink<?> sink) {
         base.getLong256(getColumnIndex(col), sink);
     }
 
@@ -104,13 +146,13 @@ class SelectedRecord implements Record {
     }
 
     @Override
-    public long getRowId() {
-        return base.getRowId();
+    public Record getRecord(int col) {
+        return base.getRecord(getColumnIndex(col));
     }
 
     @Override
-    public long getUpdateRowId() {
-        return base.getUpdateRowId();
+    public long getRowId() {
+        return base.getRowId();
     }
 
     @Override
@@ -119,18 +161,8 @@ class SelectedRecord implements Record {
     }
 
     @Override
-    public CharSequence getStr(int col) {
-        return base.getStr(getColumnIndex(col));
-    }
-
-    @Override
-    public void getStr(int col, CharSink sink) {
-        base.getStr(getColumnIndex(col), sink);
-    }
-
-    @Override
-    public Record getRecord(int col) {
-        return base.getRecord(getColumnIndex(col));
+    public CharSequence getStrA(int col) {
+        return base.getStrA(getColumnIndex(col));
     }
 
     @Override
@@ -144,8 +176,8 @@ class SelectedRecord implements Record {
     }
 
     @Override
-    public CharSequence getSym(int col) {
-        return base.getSym(getColumnIndex(col));
+    public CharSequence getSymA(int col) {
+        return base.getSymA(getColumnIndex(col));
     }
 
     @Override
@@ -159,31 +191,31 @@ class SelectedRecord implements Record {
     }
 
     @Override
-    public byte getGeoByte(int col) {
-        return base.getGeoByte(getColumnIndex(col));
+    public long getUpdateRowId() {
+        return base.getUpdateRowId();
     }
 
     @Override
-    public short getGeoShort(int col) {
-        return base.getGeoShort(getColumnIndex(col));
+    public Utf8Sequence getVarcharA(int col) {
+        return base.getVarcharA(getColumnIndex(col));
     }
 
     @Override
-    public int getGeoInt(int col) {
-        return base.getGeoInt(getColumnIndex(col));
+    public Utf8Sequence getVarcharB(int col) {
+        return base.getVarcharB(getColumnIndex(col));
     }
 
     @Override
-    public long getGeoLong(int col) {
-        return base.getGeoLong(getColumnIndex(col));
-    }
-
-    Record getBaseRecord() {
-        return base;
+    public int getVarcharSize(int col) {
+        return base.getVarcharSize(getColumnIndex(col));
     }
 
     private int getColumnIndex(int columnIndex) {
         return columnCrossIndex.getQuick(columnIndex);
+    }
+
+    Record getBaseRecord() {
+        return base;
     }
 
     void of(Record record) {

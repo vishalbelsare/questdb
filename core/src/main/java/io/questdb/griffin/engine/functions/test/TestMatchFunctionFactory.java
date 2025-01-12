@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.SymbolTableSource;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.BooleanFunction;
 import io.questdb.std.IntList;
@@ -38,9 +39,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class TestMatchFunctionFactory implements FunctionFactory {
 
+    private static final String SIGNATURE = "test_match()";
+    private static final AtomicInteger closeCount = new AtomicInteger();
     private static final AtomicInteger openCounter = new AtomicInteger();
     private static final AtomicInteger topCounter = new AtomicInteger();
-    private static final AtomicInteger closeCount = new AtomicInteger();
 
     public static boolean assertAPI(SqlExecutionContext executionContext) {
         return openCounter.get() > 0 && openCounter.get() >= closeCount.get() && topCounter.get() > 0
@@ -60,7 +62,7 @@ public class TestMatchFunctionFactory implements FunctionFactory {
 
     @Override
     public String getSignature() {
-        return "test_match()";
+        return SIGNATURE;
     }
 
     @Override
@@ -81,24 +83,19 @@ public class TestMatchFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isConstant() {
-            return false;
+        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext sqlExecutionContext) {
+            openCounter.incrementAndGet();
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public void toPlan(PlanSink sink) {
+            sink.val(SIGNATURE);
         }
 
         @Override
         public void toTop() {
             assert openCounter.get() > 0;
             topCounter.incrementAndGet();
-        }
-
-        @Override
-        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext sqlExecutionContext) {
-            openCounter.incrementAndGet();
         }
     }
 }

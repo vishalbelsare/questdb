@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.BinaryFunction;
 import io.questdb.griffin.engine.functions.IntFunction;
@@ -61,11 +62,11 @@ public class SubIntFunctionFactory implements FunctionFactory {
             int l = left.getInt(rec);
             int r = right.getInt(rec);
 
-            if (l != Numbers.INT_NaN && r != Numbers.INT_NaN) {
+            if (l != Numbers.INT_NULL && r != Numbers.INT_NULL) {
                 return l - r;
             }
 
-            return Numbers.INT_NaN;
+            return Numbers.INT_NULL;
         }
 
         @Override
@@ -74,8 +75,25 @@ public class SubIntFunctionFactory implements FunctionFactory {
         }
 
         @Override
+        public long getLong(Record rec) {
+            int l = left.getInt(rec);
+            int r = right.getInt(rec);
+
+            if (l != Numbers.INT_NULL && r != Numbers.INT_NULL) {
+                return ((long) l) - r;
+            }
+
+            return Numbers.INT_NULL;
+        }
+
+        @Override
         public Function getRight() {
             return right;
+        }
+
+        @Override
+        public void toPlan(PlanSink sink) {
+            sink.val(left).val('-').val(right);
         }
     }
 }

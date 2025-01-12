@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -66,13 +66,18 @@ public class DaysPerMonthFunctionFactory implements FunctionFactory {
         @Override
         public int getInt(Record rec) {
             final long value = arg.getTimestamp(rec);
-            if (value == Numbers.LONG_NaN) {
-                return Numbers.INT_NaN;
+            if (value == Numbers.LONG_NULL) {
+                return Numbers.INT_NULL;
             }
             final int year = Timestamps.getYear(value);
             final boolean isLeap = Timestamps.isLeapYear(year);
-            final int month = Timestamps.getMonthOfYear(value,year,isLeap);
+            final int month = Timestamps.getMonthOfYear(value, year, isLeap);
             return Timestamps.getDaysPerMonth(month, isLeap);
+        }
+
+        @Override
+        public String getName() {
+            return "days_in_month";
         }
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,48 +25,53 @@
 package io.questdb.griffin.engine.ops;
 
 import io.questdb.cairo.CairoException;
-import io.questdb.cairo.TableWriter;
+import io.questdb.cairo.TableToken;
 import io.questdb.cairo.sql.AsyncWriterCommand;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.cairo.sql.SqlExecutionCircuitBreaker;
-import io.questdb.griffin.SqlException;
+import io.questdb.cairo.wal.MetadataService;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.Misc;
-import io.questdb.std.QuietClosable;
 import io.questdb.tasks.TableWriterTask;
+import org.jetbrains.annotations.NotNull;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class UpdateOperation extends AbstractOperation implements QuietClosable {
-    public static final int WRITER_CLOSED_INCREMENT = 10;
+public class UpdateOperation extends AbstractOperation {
+
+    public static final String CMD_NAME = "UPDATE";
     public static final int SENDER_CLOSED_INCREMENT = 7;
+    public static final int WRITER_CLOSED_INCREMENT = 10;
     public static final int FULLY_CLOSED_STATE = WRITER_CLOSED_INCREMENT + SENDER_CLOSED_INCREMENT;
     private final AtomicInteger closeState = new AtomicInteger();
-    private RecordCursorFactory factory;
-    private SqlExecutionContext sqlExecutionContext;
-    private volatile boolean requesterTimeout = false;
+    private SqlExecutionCircuitBreaker circuitBreaker = SqlExecutionCircuitBreaker.NOOP_CIRCUIT_BREAKER;
     private boolean executingAsync;
-    private SqlExecutionCircuitBreaker circuitBreaker;
+    private RecordCursorFactory factory;
+    private volatile boolean requesterTimeout;
 
     public UpdateOperation(
-            String tableName,
+            @NotNull TableToken tableToken,
+            int tableId,
+            long tableVersion,
+            int tableNamePosition
+    ) {
+        this(tableToken, tableId, tableVersion, tableNamePosition, null);
+    }
+
+    public UpdateOperation(
+            @NotNull TableToken tableToken,
             int tableId,
             long tableVersion,
             int tableNamePosition,
             RecordCursorFactory factory
     ) {
-        init(TableWriterTask.CMD_UPDATE_TABLE, "UPDATE", tableName, tableId, tableVersion, tableNamePosition);
+        init(TableWriterTask.CMD_UPDATE_TABLE, CMD_NAME, tableToken, tableId, tableVersion, tableNamePosition);
         this.factory = factory;
     }
 
     @Override
-    public long apply(TableWriter tableWriter, boolean contextAllowsAnyStructureChanges) throws SqlException {
-        return tableWriter.getUpdateOperator().executeUpdate(sqlExecutionContext, this);
-    }
-
-    @Override
-    public AsyncWriterCommand deserialize(TableWriterTask task) {
-        return task.getAsyncWriterCommand();
+    public long apply(MetadataService svc, boolean contextAllowsAnyStructureChanges) {
+        return svc.getUpdateOperator().executeUpdate(sqlExecutionContext, this);
     }
 
     @Override
@@ -83,8 +88,39 @@ public class UpdateOperation extends AbstractOperation implements QuietClosable 
         }
     }
 
+    @Override
+    public AsyncWriterCommand deserialize(TableWriterTask task) {
+        return task.getAsyncWriterCommand();
+    }
+
+    public void forceTestTimeout() {
+        int state = SqlExecutionCircuitBreaker.STATE_OK;
+        if (requesterTimeout || (state = circuitBreaker.getState()) != SqlExecutionCircuitBreaker.STATE_OK) {
+            if (state == SqlExecutionCircuitBreaker.STATE_CANCELLED) {
+                throw CairoException.queryCancelled(circuitBreaker.getFd());
+            } else {
+                throw CairoException.queryTimedOut(circuitBreaker.getFd(), 0, 0);
+            }
+        }
+    }
+
+    public RecordCursorFactory getFactory() {
+        return factory;
+    }
+
+    @Override
+    public boolean isStructural() {
+        return false;
+    }
+
     public boolean isWriterClosePending() {
         return executingAsync && closeState.get() != WRITER_CLOSED_INCREMENT;
+    }
+
+    @Override
+    public void serialize(TableWriterTask task) {
+        super.serialize(task);
+        task.setAsyncWriterCommand(this);
     }
 
     public void start() {
@@ -95,35 +131,21 @@ public class UpdateOperation extends AbstractOperation implements QuietClosable 
 
     @Override
     public void startAsync() {
-        this.executingAsync = true;
-    }
-
-    public void forceTestTimeout() {
-        if (requesterTimeout || circuitBreaker.checkIfTripped()) {
-            throw CairoException.instance(0).put("timeout, query aborted [fd=").put(circuitBreaker != null ? circuitBreaker.getFd() : -1L).put(']').setInterruption(true);
-        }
+        assert closeState.get() == 0;
+        executingAsync = true;
     }
 
     public void testTimeout() {
         if (requesterTimeout) {
-            throw CairoException.instance(0).put("timeout, query aborted [fd=").put(circuitBreaker != null ? circuitBreaker.getFd() : -1L).put(']').setInterruption(true);
+            throw CairoException.queryTimedOut(circuitBreaker.getFd(), 0, 0);
         }
 
         circuitBreaker.statefulThrowExceptionIfTripped();
     }
 
-    public RecordCursorFactory getFactory() {
-        return factory;
-    }
-
     @Override
-    public void serialize(TableWriterTask task) {
-        super.serialize(task);
-        task.setAsyncWriterCommand(this);
-    }
-
-    public void withContext(SqlExecutionContext sqlExecutionContext) {
-        this.sqlExecutionContext = sqlExecutionContext;
-        this.circuitBreaker = sqlExecutionContext.getCircuitBreaker();
+    public void withContext(@NotNull SqlExecutionContext sqlExecutionContext) {
+        super.withContext(sqlExecutionContext);
+        circuitBreaker = sqlExecutionContext.getSimpleCircuitBreaker();
     }
 }

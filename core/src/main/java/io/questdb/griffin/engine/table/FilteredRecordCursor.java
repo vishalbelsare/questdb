@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.SymbolTable;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.std.Misc;
 
 class FilteredRecordCursor implements RecordCursor {
     private final Function filter;
@@ -42,7 +43,7 @@ class FilteredRecordCursor implements RecordCursor {
 
     @Override
     public void close() {
-        base.close();
+        Misc.free(base);
     }
 
     @Override
@@ -51,13 +52,13 @@ class FilteredRecordCursor implements RecordCursor {
     }
 
     @Override
-    public SymbolTable getSymbolTable(int columnIndex) {
-        return base.getSymbolTable(columnIndex);
+    public Record getRecordB() {
+        return base.getRecordB();
     }
 
     @Override
-    public SymbolTable newSymbolTable(int columnIndex) {
-        return base.newSymbolTable(columnIndex);
+    public SymbolTable getSymbolTable(int columnIndex) {
+        return base.getSymbolTable(columnIndex);
     }
 
     @Override
@@ -67,23 +68,22 @@ class FilteredRecordCursor implements RecordCursor {
                 return true;
             }
         }
-
         return false;
     }
 
     @Override
-    public long size() {
-        return -1;
-    }
-
-    @Override
-    public Record getRecordB() {
-        return base.getRecordB();
+    public SymbolTable newSymbolTable(int columnIndex) {
+        return base.newSymbolTable(columnIndex);
     }
 
     @Override
     public void recordAt(Record record, long atRowId) {
         base.recordAt(record, atRowId);
+    }
+
+    @Override
+    public long size() {
+        return -1;
     }
 
     @Override

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,28 +24,89 @@
 
 package io.questdb.cutlass.line.tcp;
 
-import io.questdb.WorkerPoolAwareConfiguration;
-import io.questdb.cairo.CairoSecurityContext;
+import io.questdb.DefaultFactoryProvider;
+import io.questdb.FactoryProvider;
+import io.questdb.Metrics;
 import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.PartitionBy;
-import io.questdb.cairo.security.AllowAllCairoSecurityContext;
-import io.questdb.cutlass.line.LineProtoNanoTimestampAdapter;
-import io.questdb.cutlass.line.LineProtoTimestampAdapter;
+import io.questdb.cutlass.line.LineTcpTimestampAdapter;
+import io.questdb.mp.WorkerPoolConfiguration;
 import io.questdb.network.DefaultIODispatcherConfiguration;
-import io.questdb.network.IODispatcherConfiguration;
 import io.questdb.network.NetworkFacade;
 import io.questdb.network.NetworkFacadeImpl;
+import io.questdb.std.FilesFacade;
+import io.questdb.std.FilesFacadeImpl;
 import io.questdb.std.datetime.microtime.MicrosecondClock;
 import io.questdb.std.datetime.microtime.MicrosecondClockImpl;
 import io.questdb.std.datetime.millitime.MillisecondClock;
 import io.questdb.std.datetime.millitime.MillisecondClockImpl;
 
-public class DefaultLineTcpReceiverConfiguration implements LineTcpReceiverConfiguration {
-    private final IODispatcherConfiguration ioDispatcherConfiguration = new DefaultIODispatcherConfiguration();
+public class DefaultLineTcpReceiverConfiguration extends DefaultIODispatcherConfiguration implements LineTcpReceiverConfiguration {
+    private static final WorkerPoolConfiguration SHARED_CONFIGURATION = new WorkerPoolConfiguration() {
+
+        @Override
+        public String getPoolName() {
+            return "ilptcp";
+        }
+
+        @Override
+        public int getWorkerCount() {
+            return 0;
+        }
+    };
 
     @Override
-    public boolean isEnabled() {
+    public String getAuthDB() {
+        return null;
+    }
+
+    @Override
+    public boolean getAutoCreateNewColumns() {
         return true;
+    }
+
+    @Override
+    public boolean getAutoCreateNewTables() {
+        return true;
+    }
+
+    @Override
+    public long getCommitInterval() {
+        return LineTcpReceiverConfigurationHelper.calcCommitInterval(
+                1_000_000,
+                getCommitIntervalFraction(),
+                getCommitIntervalDefault()
+        );
+    }
+
+    @Override
+    public long getCommitIntervalDefault() {
+        return 2000;
+    }
+
+    @Override
+    public double getCommitIntervalFraction() {
+        return 0.5;
+    }
+
+    @Override
+    public int getConnectionPoolInitialCapacity() {
+        return 4;
+    }
+
+    @Override
+    public short getDefaultColumnTypeForFloat() {
+        return ColumnType.DOUBLE;
+    }
+
+    @Override
+    public short getDefaultColumnTypeForInteger() {
+        return ColumnType.LONG;
+    }
+
+    @Override
+    public int getDefaultPartitionBy() {
+        return PartitionBy.DAY;
     }
 
     @Override
@@ -54,28 +115,28 @@ public class DefaultLineTcpReceiverConfiguration implements LineTcpReceiverConfi
     }
 
     @Override
-    public CairoSecurityContext getCairoSecurityContext() {
-        return AllowAllCairoSecurityContext.INSTANCE;
+    public FactoryProvider getFactoryProvider() {
+        return DefaultFactoryProvider.INSTANCE;
     }
 
     @Override
-    public LineProtoTimestampAdapter getTimestampAdapter() {
-        return LineProtoNanoTimestampAdapter.INSTANCE;
+    public FilesFacade getFilesFacade() {
+        return FilesFacadeImpl.INSTANCE;
     }
 
     @Override
-    public int getConnectionPoolInitialCapacity() {
-        return 64;
+    public WorkerPoolConfiguration getIOWorkerPoolConfiguration() {
+        return SHARED_CONFIGURATION;
     }
 
     @Override
-    public IODispatcherConfiguration getDispatcherConfiguration() {
-        return ioDispatcherConfiguration;
+    public long getMaintenanceInterval() {
+        return 100;
     }
 
     @Override
-    public int getNetMsgBufferSize() {
-        return 2048;
+    public int getMaxFileNameLength() {
+        return 127;
     }
 
     @Override
@@ -84,13 +145,8 @@ public class DefaultLineTcpReceiverConfiguration implements LineTcpReceiverConfi
     }
 
     @Override
-    public NetworkFacade getNetworkFacade() {
-        return NetworkFacadeImpl.INSTANCE;
-    }
-
-    @Override
-    public int getWriterQueueCapacity() {
-        return 64;
+    public Metrics getMetrics() {
+        return Metrics.ENABLED;
     }
 
     @Override
@@ -104,38 +160,23 @@ public class DefaultLineTcpReceiverConfiguration implements LineTcpReceiverConfi
     }
 
     @Override
-    public WorkerPoolAwareConfiguration getWriterWorkerPoolConfiguration() {
-        return WorkerPoolAwareConfiguration.USE_SHARED_CONFIGURATION;
+    public NetworkFacade getNetworkFacade() {
+        return NetworkFacadeImpl.INSTANCE;
     }
 
     @Override
-    public WorkerPoolAwareConfiguration getIOWorkerPoolConfiguration() {
-        return WorkerPoolAwareConfiguration.USE_SHARED_CONFIGURATION;
+    public int getRecvBufferSize() {
+        return 2048;
     }
 
     @Override
-    public long getMaintenanceInterval() {
-        return 100;
+    public long getSymbolCacheWaitBeforeReload() {
+        return 500_000;
     }
 
     @Override
-    public double getCommitIntervalFraction() {
-        return 0.5;
-    }
-
-    @Override
-    public long getCommitIntervalDefault() {
-        return 2000;
-    }
-
-    @Override
-    public String getAuthDbPath() {
-        return null;
-    }
-
-    @Override
-    public int getDefaultPartitionBy() {
-        return PartitionBy.DAY;
+    public LineTcpTimestampAdapter getTimestampAdapter() {
+        return LineTcpTimestampAdapter.DEFAULT_TS_INSTANCE;
     }
 
     @Override
@@ -144,8 +185,18 @@ public class DefaultLineTcpReceiverConfiguration implements LineTcpReceiverConfi
     }
 
     @Override
-    public long getSymbolCacheWaitUsBeforeReload() {
-        return 500_000;
+    public int getWriterQueueCapacity() {
+        return 64;
+    }
+
+    @Override
+    public WorkerPoolConfiguration getWriterWorkerPoolConfiguration() {
+        return SHARED_CONFIGURATION;
+    }
+
+    @Override
+    public boolean isEnabled() {
+        return true;
     }
 
     @Override
@@ -154,22 +205,12 @@ public class DefaultLineTcpReceiverConfiguration implements LineTcpReceiverConfi
     }
 
     @Override
-    public boolean isSymbolAsFieldSupported() {
+    public boolean isUseLegacyStringDefault() {
         return false;
     }
 
     @Override
-    public boolean isStringAsTagSupported() {
-        return false;
-    }
-
-    @Override
-    public short getDefaultColumnTypeForFloat() {
-        return ColumnType.DOUBLE;
-    }
-
-    @Override
-    public short getDefaultColumnTypeForInteger() {
-        return ColumnType.LONG;
+    public boolean logMessageOnError() {
+        return true;
     }
 }

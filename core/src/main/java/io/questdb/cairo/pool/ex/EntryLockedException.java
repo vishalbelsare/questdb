@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ public class EntryLockedException extends CairoException {
     public static EntryLockedException instance(CharSequence reason) {
         EntryLockedException ex = tlException.get();
         ex.message.clear();
+        ex.errno = CairoException.NON_CRITICAL;
         ex.put("table busy [reason=").put(reason).put("]");
         return ex;
     }

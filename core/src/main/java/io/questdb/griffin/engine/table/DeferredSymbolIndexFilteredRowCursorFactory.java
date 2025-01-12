@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,19 +24,16 @@
 
 package io.questdb.griffin.engine.table;
 
+import io.questdb.cairo.BitmapIndexReader;
 import io.questdb.cairo.EmptyRowCursor;
-import io.questdb.cairo.TableReader;
-import io.questdb.cairo.sql.DataFrame;
-import io.questdb.cairo.sql.Function;
-import io.questdb.cairo.sql.RowCursor;
-import io.questdb.cairo.sql.SymbolTable;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
-import io.questdb.std.IntList;
 
 public class DeferredSymbolIndexFilteredRowCursorFactory implements FunctionBasedRowCursorFactory {
-    private final SymbolIndexFilteredRowCursor cursor;
     private final int columnIndex;
+    private final SymbolIndexFilteredRowCursor cursor;
     private final Function symbolFunction;
     private int symbolKey = SymbolTable.VALUE_NOT_FOUND;
 
@@ -45,30 +42,29 @@ public class DeferredSymbolIndexFilteredRowCursorFactory implements FunctionBase
             Function symbolFunction,
             Function filter,
             boolean cachedIndexReaderCursor,
-            int indexDirection,
-            IntList columnIndexes
+            int indexDirection
     ) {
         this.columnIndex = columnIndex;
         this.symbolFunction = symbolFunction;
-        this.cursor = new SymbolIndexFilteredRowCursor(columnIndex, filter, cachedIndexReaderCursor, indexDirection, columnIndexes);
+        cursor = new SymbolIndexFilteredRowCursor(columnIndex, filter, cachedIndexReaderCursor, indexDirection);
     }
 
     @Override
-    public RowCursor getCursor(DataFrame dataFrame) {
+    public RowCursor getCursor(PageFrame pageFrame, PageFrameMemory pageFrameMemory) {
         if (symbolKey == SymbolTable.VALUE_NOT_FOUND) {
             return EmptyRowCursor.INSTANCE;
         }
-        return cursor.of(dataFrame);
+        return cursor.of(pageFrame, pageFrameMemory);
     }
 
     @Override
-    public void prepareCursor(TableReader tableReader, SqlExecutionContext sqlExecutionContext) throws SqlException {
-        symbolFunction.init(tableReader, sqlExecutionContext);
-        symbolKey = tableReader.getSymbolMapReader(columnIndex).keyOf(symbolFunction.getStr(null));
-        if (symbolKey != SymbolTable.VALUE_NOT_FOUND) {
-            this.cursor.of(symbolKey);
-            this.cursor.prepare(tableReader);
-        }
+    public Function getFunction() {
+        return symbolFunction;
+    }
+
+    @Override
+    public void init(PageFrameCursor pageFrameCursor, SqlExecutionContext sqlExecutionContext) throws SqlException {
+        symbolFunction.init(pageFrameCursor, sqlExecutionContext);
     }
 
     @Override
@@ -82,7 +78,19 @@ public class DeferredSymbolIndexFilteredRowCursorFactory implements FunctionBase
     }
 
     @Override
-    public Function getFunction() {
-        return symbolFunction;
+    public void prepareCursor(PageFrameCursor pageFrameCursor) {
+        symbolKey = pageFrameCursor.getSymbolTable(columnIndex).keyOf(symbolFunction.getStrA(null));
+        if (symbolKey != SymbolTable.VALUE_NOT_FOUND) {
+            cursor.of(symbolKey);
+            cursor.prepare(pageFrameCursor);
+        }
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Index ").type(BitmapIndexReader.nameOf(cursor.getIndexDirection())).type(" scan").meta("on").putBaseColumnName(columnIndex);
+        sink.meta("deferred").val(true);
+        sink.attr("symbolFilter").putBaseColumnName(columnIndex).val('=').val(symbolFunction);
+        sink.optAttr("filter", cursor.getFilter());
     }
 }

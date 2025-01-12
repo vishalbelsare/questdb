@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@ package io.questdb;
 
 import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.sql.async.PageFrameReduceTask;
+import io.questdb.cutlass.text.CopyRequestTask;
+import io.questdb.cutlass.text.CopyTask;
 import io.questdb.mp.*;
 import io.questdb.tasks.*;
 
@@ -33,31 +35,39 @@ import java.io.Closeable;
 
 public interface MessageBus extends Closeable {
 
-    Sequence getColumnPurgePubSeq();
+    MPSequence getColumnPurgePubSeq();
 
     RingQueue<ColumnPurgeTask> getColumnPurgeQueue();
 
-    Sequence getColumnPurgeSubSeq();
+    SCSequence getColumnPurgeSubSeq();
+
+    MPSequence getColumnTaskPubSeq();
+
+    RingQueue<ColumnTask> getColumnTaskQueue();
+
+    MCSequence getColumnTaskSubSeq();
 
     CairoConfiguration getConfiguration();
 
-    Sequence getIndexerPubSequence();
+    MPSequence getCopyRequestPubSeq();
+
+    MPSequence getGroupByMergeShardPubSeq();
+
+    RingQueue<GroupByMergeShardTask> getGroupByMergeShardQueue();
+
+    MCSequence getGroupByMergeShardSubSeq();
+
+    MPSequence getIndexerPubSequence();
 
     RingQueue<ColumnIndexerTask> getIndexerQueue();
 
-    Sequence getIndexerSubSequence();
+    MCSequence getIndexerSubSequence();
 
-    Sequence getLatestByPubSeq();
+    MPSequence getLatestByPubSeq();
 
     RingQueue<LatestByTask> getLatestByQueue();
 
-    Sequence getLatestBySubSeq();
-
-    MPSequence getO3CallbackPubSeq();
-
-    RingQueue<O3CallbackTask> getO3CallbackQueue();
-
-    MCSequence getO3CallbackSubSeq();
+    MCSequence getLatestBySubSeq();
 
     MPSequence getO3CopyPubSeq();
 
@@ -93,19 +103,37 @@ public interface MessageBus extends Closeable {
 
     MCSequence getPageFrameReduceSubSeq(int shard);
 
+    MPSequence getQueryCacheEventPubSeq();
+
+    MCSequence getQueryCacheEventSubSeq();
+
     FanOut getTableWriterEventFanOut();
 
     MPSequence getTableWriterEventPubSeq();
 
     RingQueue<TableWriterTask> getTableWriterEventQueue();
 
-    Sequence getVectorAggregatePubSeq();
+    SCSequence getTextImportColSeq();
+
+    SPSequence getTextImportPubSeq();
+
+    RingQueue<CopyTask> getTextImportQueue();
+
+    RingQueue<CopyRequestTask> getTextImportRequestQueue();
+
+    SCSequence getTextImportRequestSubSeq();
+
+    MCSequence getTextImportSubSeq();
+
+    MPSequence getVectorAggregatePubSeq();
 
     RingQueue<VectorAggregateTask> getVectorAggregateQueue();
 
-    Sequence getVectorAggregateSubSeq();
+    MCSequence getVectorAggregateSubSeq();
 
-    MPSequence getQueryCacheEventPubSeq();
+    MPSequence getWalTxnNotificationPubSequence();
 
-    FanOut getQueryCacheEventFanOut();
+    RingQueue<WalTxnNotificationTask> getWalTxnNotificationQueue();
+
+    MCSequence getWalTxnNotificationSubSequence();
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,17 +29,17 @@ public class IndexFrame {
     private long address;
     private long size;
 
+    public long getAddress() {
+        return address;
+    }
+
+    public long getSize() {
+        return size;
+    }
+
     IndexFrame of(long address, long size) {
         this.address = address;
         this.size = size;
         return this;
-    }
-    
-    public long getAddress() {
-        return address;
-    }
-    
-    public long getSize() {
-        return size;    
     }
 }

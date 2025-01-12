@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -40,9 +40,17 @@ import static io.questdb.griffin.SqlCodeGenerator.GKK_HOUR_INT;
 
 public class MinDateVectorAggregateFunction extends DateFunction implements VectorAggregateFunction {
 
-    public static final LongBinaryOperator MIN = Math::min;
+    public static final LongBinaryOperator MIN = (long l1, long l2) -> {
+        if (l1 == Numbers.LONG_NULL) {
+            return l2;
+        }
+        if (l2 == Numbers.LONG_NULL) {
+            return l1;
+        }
+        return Math.min(l1, l2);
+    };
     private final LongAccumulator accumulator = new LongAccumulator(
-            MIN, Long.MAX_VALUE
+            MIN, Numbers.LONG_NULL
     );
     private final int columnIndex;
     private final DistinctFunc distinctFunc;
@@ -61,27 +69,42 @@ public class MinDateVectorAggregateFunction extends DateFunction implements Vect
     }
 
     @Override
-    public void aggregate(long address, long addressSize, int columnSizeHint, int workerId) {
+    public void aggregate(long address, long frameRowCount, int workerId) {
         if (address != 0) {
-            final long value = Vect.minLong(address, addressSize / Long.BYTES);
-            if (value != Numbers.LONG_NaN) {
+            final long value = Vect.minLong(address, frameRowCount);
+            if (value != Numbers.LONG_NULL) {
                 accumulator.accumulate(value);
             }
         }
     }
 
     @Override
-    public void aggregate(long pRosti, long keyAddress, long valueAddress, long valueAddressSize, int columnSizeShr, int workerId) {
+    public boolean aggregate(long pRosti, long keyAddress, long valueAddress, long frameRowCount) {
         if (valueAddress == 0) {
-            distinctFunc.run(pRosti, keyAddress, valueAddressSize / Long.BYTES);
+            return distinctFunc.run(pRosti, keyAddress, frameRowCount);
         } else {
-            keyValueFunc.run(pRosti, keyAddress, valueAddress, valueAddressSize / Long.BYTES, valueOffset);
+            return keyValueFunc.run(pRosti, keyAddress, valueAddress, frameRowCount, valueOffset);
         }
+    }
+
+    @Override
+    public void clear() {
+        accumulator.reset();
     }
 
     @Override
     public int getColumnIndex() {
         return columnIndex;
+    }
+
+    @Override
+    public long getDate(Record rec) {
+        return accumulator.longValue();
+    }
+
+    @Override
+    public String getName() {
+        return "min";
     }
 
     @Override
@@ -91,12 +114,12 @@ public class MinDateVectorAggregateFunction extends DateFunction implements Vect
 
     @Override
     public void initRosti(long pRosti) {
-        Unsafe.getUnsafe().putLong(Rosti.getInitialValueSlot(pRosti, valueOffset), Long.MAX_VALUE);
+        Unsafe.getUnsafe().putLong(Rosti.getInitialValueSlot(pRosti, valueOffset), Numbers.LONG_NULL);
     }
 
     @Override
-    public void merge(long pRostiA, long pRostiB) {
-        Rosti.keyedIntMinLongMerge(pRostiA, pRostiB, valueOffset);
+    public boolean merge(long pRostiA, long pRostiB) {
+        return Rosti.keyedIntMinLongMerge(pRostiA, pRostiB, valueOffset);
     }
 
     @Override
@@ -106,23 +129,7 @@ public class MinDateVectorAggregateFunction extends DateFunction implements Vect
     }
 
     @Override
-    public void wrapUp(long pRosti) {
-        Rosti.keyedIntMinLongWrapUp(pRosti, valueOffset, accumulator.longValue());
-    }
-
-    @Override
-    public void clear() {
-        accumulator.reset();
-    }
-
-    @Override
-    public long getDate(Record rec) {
-        final long value = accumulator.longValue();
-        return value == Long.MAX_VALUE ? Numbers.LONG_NaN : value;
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return false;
+    public boolean wrapUp(long pRosti) {
+        return Rosti.keyedIntMinLongWrapUp(pRosti, valueOffset, accumulator.longValue());
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -39,6 +39,8 @@ import org.jetbrains.annotations.NotNull;
 
 public class SumLong256GroupByFunction extends Long256Function implements GroupByFunction, UnaryFunction {
     private final Function arg;
+    private final Long256Impl long256A = new Long256Impl();
+    private final Long256Impl long256B = new Long256Impl();
     private int valueIndex;
 
     public SumLong256GroupByFunction(@NotNull Function arg) {
@@ -46,7 +48,7 @@ public class SumLong256GroupByFunction extends Long256Function implements GroupB
     }
 
     @Override
-    public void computeFirst(MapValue mapValue, Record record) {
+    public void computeFirst(MapValue mapValue, Record record, long rowId) {
         final Long256 value = arg.getLong256A(record);
         if (!value.equals(Long256Impl.NULL_LONG256)) {
             mapValue.putLong256(valueIndex, value);
@@ -58,7 +60,7 @@ public class SumLong256GroupByFunction extends Long256Function implements GroupB
     }
 
     @Override
-    public void computeNext(MapValue mapValue, Record record) {
+    public void computeNext(MapValue mapValue, Record record, long rowId) {
         final Long256 value = arg.getLong256A(record);
         if (!value.equals(Long256Impl.NULL_LONG256)) {
             mapValue.addLong256(valueIndex, value);
@@ -67,10 +69,56 @@ public class SumLong256GroupByFunction extends Long256Function implements GroupB
     }
 
     @Override
-    public void pushValueTypes(ArrayColumnTypes columnTypes) {
+    public Function getArg() {
+        return arg;
+    }
+
+    @Override
+    public void getLong256(Record rec, CharSink<?> sink) {
+        Long256Impl v = (Long256Impl) getLong256A(rec);
+        v.toSink(sink);
+    }
+
+    @Override
+    public Long256 getLong256A(Record rec) {
+        return getLong256(rec, long256A);
+    }
+
+    @Override
+    public Long256 getLong256B(Record rec) {
+        return getLong256(rec, long256B);
+    }
+
+    @Override
+    public String getName() {
+        return "sum";
+    }
+
+    @Override
+    public int getValueIndex() {
+        return valueIndex;
+    }
+
+    @Override
+    public void initValueIndex(int valueIndex) {
+        this.valueIndex = valueIndex;
+    }
+
+    @Override
+    public void initValueTypes(ArrayColumnTypes columnTypes) {
         this.valueIndex = columnTypes.getColumnCount();
         columnTypes.add(ColumnType.LONG256);
         columnTypes.add(ColumnType.LONG);
+    }
+
+    @Override
+    public boolean isConstant() {
+        return false;
+    }
+
+    @Override
+    public boolean isThreadSafe() {
+        return false;
     }
 
     @Override
@@ -80,33 +128,15 @@ public class SumLong256GroupByFunction extends Long256Function implements GroupB
     }
 
     @Override
-    public Function getArg() {
-        return arg;
+    public boolean supportsParallelism() {
+        return false;
     }
 
-    @Override
-    public void getLong256(Record rec, CharSink sink) {
-        Long256Impl v = (Long256Impl) getLong256A(rec);
-        v.toSink(sink);
-    }
-
-    @Override
-    public Long256 getLong256A(Record rec) {
-        Long256Impl res = new Long256Impl();
+    private Long256 getLong256(Record rec, Long256Impl long256) {
         if (rec.getLong(valueIndex + 1) > 0) {
-            res.copyFrom(rec.getLong256A(valueIndex));
-            return res;
+            long256.copyFrom(rec.getLong256A(valueIndex));
+            return long256;
         }
         return Long256Impl.NULL_LONG256;
-    }
-
-    @Override
-    public Long256 getLong256B(Record rec) {
-        return getLong256A(rec);
-    }
-
-    @Override
-    public boolean isConstant() {
-        return false;
     }
 }

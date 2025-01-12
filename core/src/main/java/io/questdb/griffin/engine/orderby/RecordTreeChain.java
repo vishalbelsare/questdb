@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ package io.questdb.griffin.engine.orderby;
 import io.questdb.cairo.ColumnTypes;
 import io.questdb.cairo.RecordChain;
 import io.questdb.cairo.RecordSink;
+import io.questdb.cairo.Reopenable;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.SymbolTable;
@@ -35,126 +36,60 @@ import io.questdb.std.MemoryPages;
 import io.questdb.std.Misc;
 import io.questdb.std.Mutable;
 import io.questdb.std.Unsafe;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.Closeable;
 
-public class RecordTreeChain implements Closeable, Mutable {
+public class RecordTreeChain implements Closeable, Mutable, Reopenable {
+    private static final byte BLACK = 0;
     // P(8) + L + R + C(1) + REF + TOP
     private static final int BLOCK_SIZE = 8 + 8 + 8 + 1 + 8 + 8;
-    private static final int O_LEFT = 8;
-    private static final int O_RIGHT = 16;
     private static final int O_COLOUR = 24;
+    private static final int O_LEFT = 8;
     private static final int O_REF = 25;
+    private static final int O_RIGHT = 16;
     private static final int O_TOP = 33;
-
     private static final byte RED = 1;
-    private static final byte BLACK = 0;
-    private final RecordChain recordChain;
-    private final Record recordChainRecord;
-    private final MemoryPages mem;
     private final RecordComparator comparator;
     private final TreeCursor cursor = new TreeCursor();
+    private final MemoryPages mem;
+    private final RecordChain recordChain;
+    private final Record recordChainRecord;
     private long root = -1;
 
     public RecordTreeChain(
-            ColumnTypes columnTypes,
-            RecordSink recordSink,
-            RecordComparator comparator,
+            @NotNull ColumnTypes columnTypes,
+            @NotNull RecordSink recordSink,
+            @NotNull RecordComparator comparator,
             long keyPageSize,
             int keyMaxPages,
             long valuePageSize,
             int valueMaxPages
     ) {
-        this.comparator = comparator;
-        this.mem = new MemoryPages(keyPageSize, keyMaxPages);
-        this.recordChain = new RecordChain(columnTypes, recordSink, valuePageSize, valueMaxPages);
-        this.recordChainRecord = this.recordChain.getRecordB();
-    }
-
-    private static void setLeft(long blockAddress, long left) {
-        Unsafe.getUnsafe().putLong(blockAddress + O_LEFT, left);
-    }
-
-    private static long rightOf(long blockAddress) {
-        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_RIGHT);
-    }
-
-    private static long leftOf(long blockAddress) {
-        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_LEFT);
-    }
-
-    private static void setParent(long blockAddress, long parent) {
-        Unsafe.getUnsafe().putLong(blockAddress, parent);
-    }
-
-    private static long refOf(long blockAddress) {
-        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_REF);
-    }
-
-    private static long topOf(long blockAddress) {
-        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_TOP);
-    }
-
-    private static void setRef(long blockAddress, long recRef) {
-        Unsafe.getUnsafe().putLong(blockAddress + O_REF, recRef);
-    }
-
-    private static void setTop(long blockAddress, long recRef) {
-        Unsafe.getUnsafe().putLong(blockAddress + O_TOP, recRef);
-    }
-
-    private static void setRight(long blockAddress, long right) {
-        Unsafe.getUnsafe().putLong(blockAddress + O_RIGHT, right);
-    }
-
-    private static long parentOf(long blockAddress) {
-        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress);
-    }
-
-    private static long parent2Of(long blockAddress) {
-        return parentOf(parentOf(blockAddress));
-    }
-
-    private static void setColor(long blockAddress, byte colour) {
-        if (blockAddress == -1) {
-            return;
+        try {
+            this.comparator = comparator;
+            this.mem = new MemoryPages(keyPageSize, keyMaxPages);
+            this.recordChain = new RecordChain(columnTypes, recordSink, valuePageSize, valueMaxPages);
+            this.recordChainRecord = this.recordChain.getRecordB();
+        } catch (Throwable th) {
+            close();
+            throw th;
         }
-        Unsafe.getUnsafe().putByte(blockAddress + O_COLOUR, colour);
-    }
-
-    private static byte colorOf(long blockAddress) {
-        return blockAddress == -1 ? BLACK : Unsafe.getUnsafe().getByte(blockAddress + O_COLOUR);
-    }
-
-    private static long successor(long current) {
-        long p = rightOf(current);
-        if (p != -1) {
-            long l;
-            while ((l = leftOf(p)) != -1) {
-                p = l;
-            }
-        } else {
-            p = parentOf(current);
-            long ch = current;
-            while (p != -1 && ch == rightOf(p)) {
-                ch = p;
-                p = parentOf(p);
-            }
-        }
-        return p;
     }
 
     @Override
     public void clear() {
         root = -1;
-        this.mem.clear();
+        mem.clear();
         recordChain.clear();
     }
 
     @Override
     public void close() {
+        root = -1;
         Misc.free(recordChain);
         Misc.free(mem);
+        Misc.free(cursor);
     }
 
     public TreeCursor getCursor(RecordCursor base) {
@@ -200,6 +135,85 @@ public class RecordTreeChain implements Closeable, Mutable {
             setRight(parent, p);
         }
         fix(p);
+    }
+
+    @Override
+    public void reopen() {
+        recordChain.reopen();
+        mem.reopen();
+    }
+
+    private static byte colorOf(long blockAddress) {
+        return blockAddress == -1 ? BLACK : Unsafe.getUnsafe().getByte(blockAddress + O_COLOUR);
+    }
+
+    private static long leftOf(long blockAddress) {
+        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_LEFT);
+    }
+
+    private static long parent2Of(long blockAddress) {
+        return parentOf(parentOf(blockAddress));
+    }
+
+    private static long parentOf(long blockAddress) {
+        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress);
+    }
+
+    private static long refOf(long blockAddress) {
+        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_REF);
+    }
+
+    private static long rightOf(long blockAddress) {
+        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_RIGHT);
+    }
+
+    private static void setColor(long blockAddress, byte colour) {
+        if (blockAddress == -1) {
+            return;
+        }
+        Unsafe.getUnsafe().putByte(blockAddress + O_COLOUR, colour);
+    }
+
+    private static void setLeft(long blockAddress, long left) {
+        Unsafe.getUnsafe().putLong(blockAddress + O_LEFT, left);
+    }
+
+    private static void setParent(long blockAddress, long parent) {
+        Unsafe.getUnsafe().putLong(blockAddress, parent);
+    }
+
+    private static void setRef(long blockAddress, long recRef) {
+        Unsafe.getUnsafe().putLong(blockAddress + O_REF, recRef);
+    }
+
+    private static void setRight(long blockAddress, long right) {
+        Unsafe.getUnsafe().putLong(blockAddress + O_RIGHT, right);
+    }
+
+    private static void setTop(long blockAddress, long recRef) {
+        Unsafe.getUnsafe().putLong(blockAddress + O_TOP, recRef);
+    }
+
+    private static long successor(long current) {
+        long p = rightOf(current);
+        if (p != -1) {
+            long l;
+            while ((l = leftOf(p)) != -1) {
+                p = l;
+            }
+        } else {
+            p = parentOf(current);
+            long ch = current;
+            while (p != -1 && ch == rightOf(p)) {
+                ch = p;
+                p = parentOf(p);
+            }
+        }
+        return p;
+    }
+
+    private static long topOf(long blockAddress) {
+        return blockAddress == -1 ? -1 : Unsafe.getUnsafe().getLong(blockAddress + O_TOP);
     }
 
     private long allocateBlock() {
@@ -302,12 +316,13 @@ public class RecordTreeChain implements Closeable, Mutable {
     }
 
     public class TreeCursor implements RecordCursor {
+        private RecordCursor baseCursor;
         private long current;
-        private RecordCursor base;
 
         @Override
         public void close() {
-            base.close();
+            // base cursor's lifecycle is managed externally, so we don't close it here
+            current = -1;
         }
 
         @Override
@@ -316,13 +331,13 @@ public class RecordTreeChain implements Closeable, Mutable {
         }
 
         @Override
-        public SymbolTable getSymbolTable(int columnIndex) {
-            return base.getSymbolTable(columnIndex);
+        public Record getRecordB() {
+            return recordChain.getRecordB();
         }
 
         @Override
-        public SymbolTable newSymbolTable(int columnIndex) {
-            return base.newSymbolTable(columnIndex);
+        public SymbolTable getSymbolTable(int columnIndex) {
+            return baseCursor.getSymbolTable(columnIndex);
         }
 
         @Override
@@ -341,18 +356,18 @@ public class RecordTreeChain implements Closeable, Mutable {
         }
 
         @Override
-        public long size() {
-            return base.size();
-        }
-
-        @Override
-        public Record getRecordB() {
-            return recordChain.getRecordB();
+        public SymbolTable newSymbolTable(int columnIndex) {
+            return baseCursor.newSymbolTable(columnIndex);
         }
 
         @Override
         public void recordAt(Record record, long atRowId) {
             recordChain.recordAt(record, atRowId);
+        }
+
+        @Override
+        public long size() {
+            return baseCursor.size();
         }
 
         @Override
@@ -367,7 +382,7 @@ public class RecordTreeChain implements Closeable, Mutable {
         }
 
         private void of(RecordCursor base) {
-            this.base = base;
+            this.baseCursor = base;
             recordChain.setSymbolTableResolver(base);
             toTop();
         }

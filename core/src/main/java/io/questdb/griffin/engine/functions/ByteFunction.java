@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,24 +31,9 @@ import io.questdb.cairo.sql.ScalarFunction;
 import io.questdb.std.BinarySequence;
 import io.questdb.std.Long256;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
 
 public abstract class ByteFunction implements ScalarFunction {
-
-    @Override
-    public final Long256 getLong256A(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public final Long256 getLong256B(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public final char getChar(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
     @Override
     public final BinarySequence getBin(Record rec) {
         throw new UnsupportedOperationException();
@@ -61,6 +46,11 @@ public abstract class ByteFunction implements ScalarFunction {
 
     @Override
     public final boolean getBool(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final char getChar(Record rec) {
         throw new UnsupportedOperationException();
     }
 
@@ -80,6 +70,31 @@ public abstract class ByteFunction implements ScalarFunction {
     }
 
     @Override
+    public byte getGeoByte(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int getGeoInt(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getGeoLong(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public short getGeoShort(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final int getIPv4(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public int getInt(Record rec) {
         return getByte(rec);
     }
@@ -87,6 +102,31 @@ public abstract class ByteFunction implements ScalarFunction {
     @Override
     public long getLong(Record rec) {
         return getByte(rec);
+    }
+
+    @Override
+    public long getLong128Hi(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getLong128Lo(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final void getLong256(Record rec, CharSink<?> sink) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final Long256 getLong256A(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final Long256 getLong256B(Record rec) {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -100,12 +140,7 @@ public abstract class ByteFunction implements ScalarFunction {
     }
 
     @Override
-    public final CharSequence getStr(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public final void getStr(Record rec, CharSink sink) {
+    public final CharSequence getStrA(Record rec) {
         throw new UnsupportedOperationException();
     }
 
@@ -135,32 +170,22 @@ public abstract class ByteFunction implements ScalarFunction {
     }
 
     @Override
-    public final void getLong256(Record rec, CharSink sink) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public byte getGeoByte(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public short getGeoShort(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int getGeoInt(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public long getGeoLong(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
     public final int getType() {
         return ColumnType.BYTE;
+    }
+
+    @Override
+    public Utf8Sequence getVarcharA(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Utf8Sequence getVarcharB(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final int getVarcharSize(Record rec) {
+        throw new UnsupportedOperationException();
     }
 }

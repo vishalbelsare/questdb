@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,27 +24,34 @@
 
 package io.questdb.griffin.engine.functions.bind;
 
-import io.questdb.cairo.CairoException;
 import io.questdb.cairo.ColumnType;
-import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.BinarySequence;
+import io.questdb.std.Chars;
 import io.questdb.std.Long256;
 import io.questdb.std.Misc;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
 
 public class IndexedParameterLinkFunction implements ScalarFunction {
-    private final int variableIndex;
     private final int position;
-    private int type;
+    private final int variableIndex;
     private Function base;
+    private int type;
 
     public IndexedParameterLinkFunction(int variableIndex, int type, int position) {
         this.variableIndex = variableIndex;
         this.type = type;
         this.position = position;
+    }
+
+    @Override
+    public void assignType(int type, BindVariableService bindVariableService) throws SqlException {
+        this.type = bindVariableService.define(variableIndex, type, position);
     }
 
     @Override
@@ -93,6 +100,31 @@ public class IndexedParameterLinkFunction implements ScalarFunction {
     }
 
     @Override
+    public byte getGeoByte(Record rec) {
+        return getBase().getGeoByte(rec);
+    }
+
+    @Override
+    public int getGeoInt(Record rec) {
+        return getBase().getGeoInt(rec);
+    }
+
+    @Override
+    public long getGeoLong(Record rec) {
+        return getBase().getGeoLong(rec);
+    }
+
+    @Override
+    public short getGeoShort(Record rec) {
+        return getBase().getGeoShort(rec);
+    }
+
+    @Override
+    public final int getIPv4(Record rec) {
+        return getBase().getIPv4(rec);
+    }
+
+    @Override
     public int getInt(Record rec) {
         return getBase().getInt(rec);
     }
@@ -103,7 +135,17 @@ public class IndexedParameterLinkFunction implements ScalarFunction {
     }
 
     @Override
-    public void getLong256(Record rec, CharSink sink) {
+    public long getLong128Hi(Record rec) {
+        return getBase().getLong128Hi(rec);
+    }
+
+    @Override
+    public long getLong128Lo(Record rec) {
+        return getBase().getLong128Lo(rec);
+    }
+
+    @Override
+    public void getLong256(Record rec, CharSink<?> sink) {
         getBase().getLong256(rec, sink);
     }
 
@@ -128,13 +170,8 @@ public class IndexedParameterLinkFunction implements ScalarFunction {
     }
 
     @Override
-    public CharSequence getStr(Record rec) {
-        return getBase().getStr(rec);
-    }
-
-    @Override
-    public void getStr(Record rec, CharSink sink) {
-        getBase().getStr(rec, sink);
+    public CharSequence getStrA(Record rec) {
+        return getBase().getStrA(rec);
     }
 
     @Override
@@ -163,50 +200,23 @@ public class IndexedParameterLinkFunction implements ScalarFunction {
     }
 
     @Override
-    public byte getGeoByte(Record rec) {
-        return getBase().getGeoByte(rec);
-    }
-
-    @Override
-    public short getGeoShort(Record rec) {
-        return getBase().getGeoShort(rec);
-    }
-
-    @Override
-    public int getGeoInt(Record rec) {
-        return getBase().getGeoInt(rec);
-    }
-
-    @Override
-    public long getGeoLong(Record rec) {
-        return getBase().getGeoLong(rec);
-    }
-
-    @Override
     public int getType() {
         return type;
     }
 
     @Override
-    public void assignType(int type, BindVariableService bindVariableService) throws SqlException {
-        this.type = bindVariableService.define(variableIndex, type, position);
+    public Utf8Sequence getVarcharA(Record rec) {
+        return getBase().getVarcharA(rec);
     }
 
     @Override
-    public boolean isRuntimeConstant() {
-        return true;
+    public Utf8Sequence getVarcharB(Record rec) {
+        return getBase().getVarcharB(rec);
     }
 
     @Override
-    public boolean isReadThreadSafe() {
-        switch (type) {
-            case ColumnType.STRING:
-            case ColumnType.SYMBOL:
-            case ColumnType.LONG256:
-                return false;
-            default:
-                return true;
-        }
+    public int getVarcharSize(Record rec) {
+        return getBase().getVarcharSize(rec);
     }
 
     public int getVariableIndex() {
@@ -217,9 +227,25 @@ public class IndexedParameterLinkFunction implements ScalarFunction {
     public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
         base = executionContext.getBindVariableService().getFunction(variableIndex);
         if (base == null) {
-            throw CairoException.instance(0).put("undefined bind variable: ").put(variableIndex);
+            throw SqlException.position(position).put("undefined bind variable: ").put(variableIndex);
         }
+        this.type = base.getType();
         base.init(symbolTableSource, executionContext);
+    }
+
+    @Override
+    public boolean isRuntimeConstant() {
+        return true;
+    }
+
+    @Override
+    public boolean isThreadSafe() {
+        return true;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.val("$").val(variableIndex).val("::").val(Chars.toLowerCaseAscii(ColumnType.nameOf(type)));
     }
 
     private Function getBase() {

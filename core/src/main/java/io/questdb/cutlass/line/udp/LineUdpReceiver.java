@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ public class LineUdpReceiver extends AbstractLineProtoUdpReceiver {
             WorkerPool workerPool
     ) {
         super(configuration, engine, workerPool);
-        this.buf = Unsafe.malloc(this.bufLen = configuration.getMsgBufferSize(), MemoryTag.NATIVE_DEFAULT);
+        this.buf = Unsafe.malloc(this.bufLen = configuration.getMsgBufferSize(), MemoryTag.NATIVE_ILP_RSS);
         start();
     }
 
@@ -47,7 +47,7 @@ public class LineUdpReceiver extends AbstractLineProtoUdpReceiver {
     public void close() {
         super.close();
         if (buf != 0) {
-            Unsafe.free(buf, bufLen, MemoryTag.NATIVE_DEFAULT);
+            Unsafe.free(buf, bufLen, MemoryTag.NATIVE_ILP_RSS);
             buf = 0;
         }
     }
@@ -56,7 +56,7 @@ public class LineUdpReceiver extends AbstractLineProtoUdpReceiver {
     protected boolean runSerially() {
         boolean ran = false;
         int count;
-        while ((count = nf.recv(fd, buf, bufLen)) > 0) {
+        while ((count = nf.recvRaw(fd, buf, bufLen)) > 0) {
             lexer.parse(buf, buf + count);
             lexer.parseLast();
 
@@ -64,7 +64,7 @@ public class LineUdpReceiver extends AbstractLineProtoUdpReceiver {
 
             if (totalCount > commitRate) {
                 totalCount = 0;
-                parser.commitAll(commitMode);
+                parser.commitAll();
             }
 
             if (ran) {
@@ -73,7 +73,7 @@ public class LineUdpReceiver extends AbstractLineProtoUdpReceiver {
 
             ran = true;
         }
-        parser.commitAll(commitMode);
+        parser.commitAll();
         return ran;
     }
 }

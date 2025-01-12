@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ import io.questdb.std.str.LPSZ;
 
 import java.io.Closeable;
 
-//mapped 
+// mapped
 public interface MemoryM extends Closeable {
 
     long addressOf(long offset);
@@ -42,6 +42,11 @@ public interface MemoryM extends Closeable {
 
     @Override
     void close();
+
+    /**
+     * Extracts File Descriptor to reuse and unmaps the memory.
+     */
+    long detachFdClose();
 
     long getFd();
 
@@ -73,19 +78,24 @@ public interface MemoryM extends Closeable {
      *                          should use this parameter as the increment size
      * @param size              size of the initial mapped memory when smaller than the actual file
      * @param memoryTag         memory tag for diagnostics
-     *
+     * @param opts              open file flags
+     * @param madviseOpts       madvise flags - madvise call is made when a non-negative value is provided
      */
-    void of(FilesFacade ff, LPSZ name, long extendSegmentSize, long size, int memoryTag, long opts);
+    void of(FilesFacade ff, LPSZ name, long extendSegmentSize, long size, int memoryTag, long opts, int madviseOpts);
+
+    default void of(FilesFacade ff, LPSZ name, long extendSegmentSize, long size, int memoryTag, long opts) {
+        of(ff, name, extendSegmentSize, size, memoryTag, opts, -1);
+    }
 
     default void of(FilesFacade ff, LPSZ name, long extendSegmentSize, long size, int memoryTag) {
-        of(ff, name, extendSegmentSize, size, memoryTag, CairoConfiguration.O_NONE);
+        of(ff, name, extendSegmentSize, size, memoryTag, CairoConfiguration.O_NONE, -1);
     }
 
     default void smallFile(FilesFacade ff, LPSZ name, int memoryTag) {
-        of(ff, name, ff.getPageSize(), ff.length(name), memoryTag, CairoConfiguration.O_NONE);
+        of(ff, name, ff.getPageSize(), ff.length(name), memoryTag, CairoConfiguration.O_NONE, -1);
     }
 
     default void wholeFile(FilesFacade ff, LPSZ name, int memoryTag) {
-        of(ff, name, ff.getMapPageSize(), ff.length(name), memoryTag, CairoConfiguration.O_NONE);
+        of(ff, name, ff.getMapPageSize(), ff.length(name), memoryTag, CairoConfiguration.O_NONE, -1);
     }
 }

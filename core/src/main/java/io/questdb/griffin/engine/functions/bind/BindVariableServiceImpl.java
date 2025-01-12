@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,41 +31,49 @@ import io.questdb.cairo.sql.BindVariableService;
 import io.questdb.cairo.sql.Function;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlKeywords;
-import io.questdb.griffin.model.IntervalUtils;
-import io.questdb.std.*;
-import io.questdb.std.datetime.DateFormat;
-import io.questdb.std.datetime.millitime.DateFormatCompiler;
-import io.questdb.std.datetime.millitime.DateFormatUtils;
+import io.questdb.griffin.SqlUtil;
+import io.questdb.griffin.engine.functions.UndefinedFunction;
+import io.questdb.std.BinarySequence;
+import io.questdb.std.CharSequenceObjHashMap;
+import io.questdb.std.Chars;
+import io.questdb.std.Long256;
+import io.questdb.std.Long256Impl;
+import io.questdb.std.Misc;
+import io.questdb.std.Numbers;
+import io.questdb.std.ObjList;
+import io.questdb.std.ObjectPool;
+import io.questdb.std.Transient;
+import io.questdb.std.str.StringSink;
+import io.questdb.std.str.Utf8Sequence;
+import io.questdb.std.str.Utf8s;
 import org.jetbrains.annotations.Nullable;
 
-import static io.questdb.std.datetime.millitime.DateFormatUtils.*;
-
 public class BindVariableServiceImpl implements BindVariableService {
-    private static final DateFormat[] DATE_FORMATS;
-    private static final int DATE_FORMATS_SIZE;
-    private static final DateFormat[] TIMESTAMP_FORMATS;
-    private static final int TIMESTAMP_FORMATS_SIZE;
-    private final CharSequenceObjHashMap<Function> namedVariables = new CharSequenceObjHashMap<>();
-    private final ObjList<Function> indexedVariables = new ObjList<>();
+    private final ObjectPool<IPv4BindVariable> IPv4VarPool;
+    private final ObjectPool<BooleanBindVariable> booleanVarPool;
+    private final ObjectPool<ByteBindVariable> byteVarPool;
+    private final ObjectPool<CharBindVariable> charVarPool;
+    private final ObjectPool<DateBindVariable> dateVarPool;
     private final ObjectPool<DoubleBindVariable> doubleVarPool;
     private final ObjectPool<FloatBindVariable> floatVarPool;
-    private final ObjectPool<IntBindVariable> intVarPool;
-    private final ObjectPool<LongBindVariable> longVarPool;
-    private final ObjectPool<TimestampBindVariable> timestampVarPool;
-    private final ObjectPool<DateBindVariable> dateVarPool;
-    private final ObjectPool<ShortBindVariable> shortVarPool;
-    private final ObjectPool<ByteBindVariable> byteVarPool;
     private final ObjectPool<GeoHashBindVariable> geoHashVarPool;
-    private final ObjectPool<BooleanBindVariable> booleanVarPool;
-    private final ObjectPool<StrBindVariable> strVarPool;
-    private final ObjectPool<CharBindVariable> charVarPool;
+    private final ObjList<Function> indexedVariables = new ObjList<>();
+    private final ObjectPool<IntBindVariable> intVarPool;
     private final ObjectPool<Long256BindVariable> long256VarPool;
+    private final ObjectPool<LongBindVariable> longVarPool;
+    private final CharSequenceObjHashMap<Function> namedVariables = new CharSequenceObjHashMap<>();
+    private final ObjectPool<ShortBindVariable> shortVarPool;
+    private final ObjectPool<StrBindVariable> strVarPool;
+    private final ObjectPool<TimestampBindVariable> timestampVarPool;
+    private final ObjectPool<UuidBindVariable> uuidVarPool;
+    private final ObjectPool<VarcharBindVariable> varcharVarPool;
 
     public BindVariableServiceImpl(CairoConfiguration configuration) {
         final int poolSize = configuration.getBindVariablePoolSize();
         this.doubleVarPool = new ObjectPool<>(DoubleBindVariable::new, poolSize);
         this.floatVarPool = new ObjectPool<>(FloatBindVariable::new, poolSize);
         this.intVarPool = new ObjectPool<>(IntBindVariable::new, poolSize);
+        this.IPv4VarPool = new ObjectPool<>(IPv4BindVariable::new, poolSize);
         this.longVarPool = new ObjectPool<>(LongBindVariable::new, poolSize);
         this.timestampVarPool = new ObjectPool<>(TimestampBindVariable::new, poolSize);
         this.dateVarPool = new ObjectPool<>(DateBindVariable::new, poolSize);
@@ -73,20 +81,11 @@ public class BindVariableServiceImpl implements BindVariableService {
         this.byteVarPool = new ObjectPool<>(ByteBindVariable::new, poolSize);
         this.geoHashVarPool = new ObjectPool<>(GeoHashBindVariable::new, poolSize);
         this.booleanVarPool = new ObjectPool<>(BooleanBindVariable::new, poolSize);
-        this.strVarPool = new ObjectPool<>(() -> new StrBindVariable(configuration.getFloatToStrCastScale()), poolSize);
+        this.strVarPool = new ObjectPool<>(StrBindVariable::new, poolSize);
         this.charVarPool = new ObjectPool<>(CharBindVariable::new, 8);
         this.long256VarPool = new ObjectPool<>(Long256BindVariable::new, 8);
-    }
-
-    public static long parseDate(CharSequence value) throws NumericException {
-        final int hi = value.length();
-        for (int i = 0; i < DATE_FORMATS_SIZE; i++) {
-            try {
-                return DATE_FORMATS[i].parse(value, 0, hi, DateFormatUtils.enLocale);
-            } catch (NumericException ignore) {
-            }
-        }
-        return Numbers.parseLong(value, 0, hi);
+        this.uuidVarPool = new ObjectPool<>(UuidBindVariable::new, 8);
+        this.varcharVarPool = new ObjectPool<>(VarcharBindVariable::new, poolSize);
     }
 
     @Override
@@ -96,6 +95,7 @@ public class BindVariableServiceImpl implements BindVariableService {
         doubleVarPool.clear();
         floatVarPool.clear();
         intVarPool.clear();
+        IPv4VarPool.clear();
         longVarPool.clear();
         timestampVarPool.clear();
         dateVarPool.clear();
@@ -106,11 +106,17 @@ public class BindVariableServiceImpl implements BindVariableService {
         charVarPool.clear();
         long256VarPool.clear();
         geoHashVarPool.clear();
+        uuidVarPool.clear();
+        varcharVarPool.clear();
     }
 
     @Override
     public int define(int index, int type, int position) throws SqlException {
         switch (ColumnType.tagOf(type)) {
+            // unable to define undefined type
+            case ColumnType.UNDEFINED:
+                setUndefined(index);
+                return type;
             case ColumnType.BOOLEAN:
                 setBoolean(index);
                 return type;
@@ -125,6 +131,9 @@ public class BindVariableServiceImpl implements BindVariableService {
                 return type;
             case ColumnType.INT:
                 setInt(index);
+                return type;
+            case ColumnType.IPv4:
+                setIPv4(index);
                 return type;
             case ColumnType.LONG:
                 setLong(index);
@@ -143,9 +152,12 @@ public class BindVariableServiceImpl implements BindVariableService {
                 return type;
             case ColumnType.STRING:
             case ColumnType.SYMBOL:
-            case ColumnType.VAR_ARG:
                 setStr(index);
                 return ColumnType.STRING;
+            case ColumnType.VAR_ARG:
+                // we cannot define bind variable as vararg, it is
+                // a code for method signature and is not a "type"
+                throw SqlException.$(position, "unsupported type: VAR_ARG");
             case ColumnType.LONG256:
                 setLong256(index);
                 return type;
@@ -157,6 +169,12 @@ public class BindVariableServiceImpl implements BindVariableService {
             case ColumnType.GEOINT:
             case ColumnType.GEOLONG:
                 setGeoHash(index, type);
+                return type;
+            case ColumnType.UUID:
+                setUuid(index);
+                return type;
+            case ColumnType.VARCHAR:
+                setVarchar(index);
                 return type;
             default:
                 throw SqlException.$(position, "bind variable cannot be used [contextType=").put(ColumnType.nameOf(type)).put(", index=").put(index).put(']');
@@ -182,6 +200,11 @@ public class BindVariableServiceImpl implements BindVariableService {
     @Override
     public int getIndexedVariableCount() {
         return indexedVariables.size();
+    }
+
+    @Override
+    public ObjList<CharSequence> getNamedVariables() {
+        return namedVariables.keys();
     }
 
     @Override
@@ -273,40 +296,8 @@ public class BindVariableServiceImpl implements BindVariableService {
     }
 
     @Override
-    public void setGeoHash(CharSequence name, long value, int type) throws SqlException {
-        int index = namedVariables.keyIndex(name);
-        if (index > -1) {
-            final GeoHashBindVariable function;
-            namedVariables.putAt(index, name, function = geoHashVarPool.next());
-            function.value = value;
-            function.setType(type);
-        } else {
-            setGeoHash0(namedVariables.valueAtQuick(index), value, type, -1, name);
-        }
-    }
-
-    @Override
-    public void setGeoHash(int index, long value, int type) throws SqlException {
-        indexedVariables.extendPos(index + 1);
-        // variable exists
-        Function function = indexedVariables.getQuick(index);
-        if (function != null) {
-            setGeoHash0(function, value, type, index, null);
-        } else {
-            indexedVariables.setQuick(index, function = geoHashVarPool.next());
-            ((GeoHashBindVariable) function).value = value;
-            ((GeoHashBindVariable) function).setType(type);
-        }
-    }
-
-    @Override
     public void setByte(int index) throws SqlException {
         setByte(index, (byte) 0);
-    }
-
-    @Override
-    public void setGeoHash(int index, int type) throws SqlException {
-        setGeoHash(index, GeoHashes.NULL, type);
     }
 
     @Override
@@ -353,7 +344,7 @@ public class BindVariableServiceImpl implements BindVariableService {
 
     @Override
     public void setDate(int index) throws SqlException {
-        setDate(index, Numbers.LONG_NaN);
+        setDate(index, Numbers.LONG_NULL);
     }
 
     @Override
@@ -430,6 +421,69 @@ public class BindVariableServiceImpl implements BindVariableService {
     }
 
     @Override
+    public void setGeoHash(CharSequence name, long value, int type) throws SqlException {
+        int index = namedVariables.keyIndex(name);
+        if (index > -1) {
+            final GeoHashBindVariable function;
+            namedVariables.putAt(index, name, function = geoHashVarPool.next());
+            function.value = value;
+            function.setType(type);
+        } else {
+            setGeoHash0(namedVariables.valueAtQuick(index), value, type, -1, name);
+        }
+    }
+
+    @Override
+    public void setGeoHash(int index, long value, int type) throws SqlException {
+        indexedVariables.extendPos(index + 1);
+        // variable exists
+        Function function = indexedVariables.getQuick(index);
+        if (function != null) {
+            setGeoHash0(function, value, type, index, null);
+        } else {
+            indexedVariables.setQuick(index, function = geoHashVarPool.next());
+            ((GeoHashBindVariable) function).value = value;
+            ((GeoHashBindVariable) function).setType(type);
+        }
+    }
+
+    @Override
+    public void setGeoHash(int index, int type) throws SqlException {
+        setGeoHash(index, GeoHashes.NULL, type);
+    }
+
+    @Override
+    public void setIPv4(int index) {
+        setIPv4(index, Numbers.IPv4_NULL);
+    }
+
+    @Override
+    public void setIPv4(int index, int value) {
+        indexedVariables.extendPos(index + 1);
+        // variable exists
+        Function function = indexedVariables.getQuick(index);
+        if (function != null) {
+            setIPv40(function, value);
+        } else {
+            indexedVariables.setQuick(index, function = IPv4VarPool.next());
+            ((IPv4BindVariable) function).value = value;
+        }
+    }
+
+    @Override
+    public void setIPv4(int index, CharSequence value) {
+        indexedVariables.extendPos(index + 1);
+        // variable exists
+        Function function = indexedVariables.getQuick(index);
+        if (function != null) {
+            setIPv40(function, Numbers.parseIPv4Quiet(value));
+        } else {
+            indexedVariables.setQuick(index, function = IPv4VarPool.next());
+            ((IPv4BindVariable) function).value = Numbers.parseIPv4Quiet(value);
+        }
+    }
+
+    @Override
     public void setInt(CharSequence name, int value) throws SqlException {
         int index = namedVariables.keyIndex(name);
         if (index > -1) {
@@ -443,7 +497,7 @@ public class BindVariableServiceImpl implements BindVariableService {
 
     @Override
     public void setInt(int index) throws SqlException {
-        setInt(index, Numbers.INT_NaN);
+        setInt(index, Numbers.INT_NULL);
     }
 
     @Override
@@ -473,7 +527,7 @@ public class BindVariableServiceImpl implements BindVariableService {
 
     @Override
     public void setLong(int index) throws SqlException {
-        setLong(index, Numbers.LONG_NaN);
+        setLong(index, Numbers.LONG_NULL);
     }
 
     @Override
@@ -523,7 +577,7 @@ public class BindVariableServiceImpl implements BindVariableService {
 
     @Override
     public void setLong256(int index) throws SqlException {
-        setLong256(index, Numbers.LONG_NaN, Numbers.LONG_NaN, Numbers.LONG_NaN, Numbers.LONG_NaN);
+        setLong256(index, Numbers.LONG_NULL, Numbers.LONG_NULL, Numbers.LONG_NULL, Numbers.LONG_NULL);
     }
 
     @Override
@@ -614,7 +668,7 @@ public class BindVariableServiceImpl implements BindVariableService {
 
     @Override
     public void setTimestamp(int index) throws SqlException {
-        setTimestamp(index, Numbers.LONG_NaN);
+        setTimestamp(index, Numbers.LONG_NULL);
     }
 
     @Override
@@ -642,16 +696,63 @@ public class BindVariableServiceImpl implements BindVariableService {
         }
     }
 
-    private static long parseTimestamp(CharSequence value) throws NumericException {
-        final int hi = value.length();
-        for (int i = 0; i < TIMESTAMP_FORMATS_SIZE; i++) {
-            try {
-                return TIMESTAMP_FORMATS[i].parse(value, 0, hi, enLocale);
-            } catch (NumericException ignore) {
-            }
+    @Override
+    public void setUuid(int index, long lo, long hi) throws SqlException {
+        indexedVariables.extendPos(index + 1);
+        // variable exists
+        Function function = indexedVariables.getQuick(index);
+        if (function != null) {
+            setUuid(function, lo, hi, index, null);
+        } else {
+            indexedVariables.setQuick(index, function = uuidVarPool.next());
+            ((UuidBindVariable) function).set(lo, hi);
         }
-        // Parse as ISO with variable length.
-        return IntervalUtils.parseFloorPartialDate(value);
+    }
+
+    @Override
+    public void setUuid(CharSequence name, long lo, long hi) throws SqlException {
+        int index = namedVariables.keyIndex(name);
+        if (index > -1) {
+            final UuidBindVariable function;
+            namedVariables.putAt(index, name, function = uuidVarPool.next());
+            function.set(lo, hi);
+        } else {
+            setUuid(namedVariables.valueAtQuick(index), lo, hi, -1, name);
+        }
+    }
+
+    public void setUuid(int index) throws SqlException {
+        setUuid(index, Numbers.LONG_NULL, Numbers.LONG_NULL);
+    }
+
+    @Override
+    public void setVarchar(int index) throws SqlException {
+        setVarchar(index, null);
+    }
+
+    @Override
+    public void setVarchar(int index, @Transient Utf8Sequence value) throws SqlException {
+        indexedVariables.extendPos(index + 1);
+        // variable exists
+        Function function = indexedVariables.getQuick(index);
+        if (function != null) {
+            setVarchar0(function, value, index, null);
+        } else {
+            indexedVariables.setQuick(index, function = varcharVarPool.next());
+            ((VarcharBindVariable) function).setValue(value);
+        }
+    }
+
+    @Override
+    public void setVarchar(CharSequence name, Utf8Sequence value) throws SqlException {
+        int index = namedVariables.keyIndex(name);
+        if (index > -1) {
+            final VarcharBindVariable function;
+            namedVariables.putAt(index, name, function = varcharVarPool.next());
+            function.setValue(value);
+        } else {
+            setVarchar0(namedVariables.valueAtQuick(index), value, -1, name);
+        }
     }
 
     private static void reportError(Function function, int srcType, int index, @Nullable CharSequence name) throws SqlException {
@@ -661,137 +762,6 @@ public class BindVariableServiceImpl implements BindVariableService {
         throw SqlException.$(0, "bind variable '").put(name).put("' is defined as ").put(ColumnType.nameOf(function.getType())).put(" and cannot accept ").put(ColumnType.nameOf(srcType));
     }
 
-    private static void setDouble0(Function function, double value, int index, @Nullable CharSequence name) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.DOUBLE:
-                ((DoubleBindVariable) function).value = value;
-                break;
-            case ColumnType.STRING:
-                if (value == value) {
-                    ((StrBindVariable) function).setValue(value);
-                } else {
-                    ((StrBindVariable) function).setValue(null);
-                }
-                break;
-            default:
-                reportError(function, ColumnType.DOUBLE, index, name);
-                break;
-        }
-    }
-
-    private static void setFloat0(Function function, float value, int index, @Nullable CharSequence name) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.FLOAT:
-                ((FloatBindVariable) function).value = value;
-                break;
-            case ColumnType.DOUBLE:
-                ((DoubleBindVariable) function).value = value;
-                break;
-            case ColumnType.STRING:
-                if (value == value) {
-                    ((StrBindVariable) function).setValue(value);
-                } else {
-                    ((StrBindVariable) function).setValue(null);
-                }
-                break;
-            default:
-                reportError(function, ColumnType.FLOAT, index, name);
-                break;
-        }
-    }
-
-    private static void setInt0(Function function, int value, int index, @Nullable CharSequence name) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.INT:
-                ((IntBindVariable) function).value = value;
-                break;
-            case ColumnType.LONG:
-                ((LongBindVariable) function).value = value != Numbers.INT_NaN ? value : Numbers.LONG_NaN;
-                break;
-            case ColumnType.TIMESTAMP:
-                ((TimestampBindVariable) function).value = value != Numbers.INT_NaN ? value : Numbers.LONG_NaN;
-                break;
-            case ColumnType.DATE:
-                ((DateBindVariable) function).value = value != Numbers.INT_NaN ? value : Numbers.LONG_NaN;
-                break;
-            case ColumnType.FLOAT:
-                ((FloatBindVariable) function).value = value != Numbers.INT_NaN ? value : Float.NaN;
-                break;
-            case ColumnType.DOUBLE:
-                ((DoubleBindVariable) function).value = value != Numbers.INT_NaN ? value : Double.NaN;
-                break;
-            case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(value);
-                break;
-            default:
-                reportError(function, ColumnType.INT, index, name);
-                break;
-        }
-    }
-
-    private static void setLong0(Function function, long value, int index, @Nullable CharSequence name, int srcType) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.INT:
-                ((IntBindVariable) function).value = (int) value;
-                break;
-            case ColumnType.LONG:
-                ((LongBindVariable) function).value = value;
-                break;
-            case ColumnType.TIMESTAMP:
-                ((TimestampBindVariable) function).value = value;
-                break;
-            case ColumnType.DATE:
-                ((DateBindVariable) function).value = value;
-                break;
-            case ColumnType.FLOAT:
-                ((FloatBindVariable) function).value = value != Numbers.LONG_NaN ? value : Float.NaN;
-                break;
-            case ColumnType.DOUBLE:
-                ((DoubleBindVariable) function).value = value != Numbers.LONG_NaN ? value : Double.NaN;
-                break;
-            case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(value);
-                break;
-            default:
-                reportError(function, srcType, index, name);
-                break;
-        }
-    }
-
-    private static void setTimestamp0(Function function, long value, int index) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.INT:
-                ((IntBindVariable) function).value = (int) value;
-                break;
-            case ColumnType.LONG:
-                ((LongBindVariable) function).value = value;
-                break;
-            case ColumnType.TIMESTAMP:
-                ((TimestampBindVariable) function).value = value;
-                break;
-            case ColumnType.DATE:
-                ((DateBindVariable) function).value = value != Numbers.LONG_NaN ? value / 1000 : value;
-                break;
-            case ColumnType.FLOAT:
-                ((FloatBindVariable) function).value = value != Numbers.LONG_NaN ? value : Float.NaN;
-                break;
-            case ColumnType.DOUBLE:
-                ((DoubleBindVariable) function).value = value != Numbers.LONG_NaN ? value : Double.NaN;
-                break;
-            case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(value);
-                break;
-            default:
-                reportError(function, ColumnType.TIMESTAMP, index, null);
-                break;
-        }
-    }
-
     private static void setBoolean0(Function function, boolean value, int index, @Nullable CharSequence name) throws SqlException {
         final int functionType = ColumnType.tagOf(function.getType());
         switch (functionType) {
@@ -799,87 +769,13 @@ public class BindVariableServiceImpl implements BindVariableService {
                 ((BooleanBindVariable) function).value = value;
                 break;
             case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(Boolean.toString(value));
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
                 break;
             default:
                 reportError(function, ColumnType.BOOLEAN, index, name);
-                break;
-        }
-    }
-
-    private static void setChar0(Function function, char value, int index, @Nullable CharSequence name) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.CHAR:
-                ((CharBindVariable) function).value = value;
-                break;
-            case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(value);
-                break;
-            default:
-                reportError(function, ColumnType.CHAR, index, name);
-                break;
-        }
-    }
-
-    private static void setLong2560(
-            Function function,
-            long l0,
-            long l1,
-            long l2,
-            long l3,
-            int index,
-            @Nullable CharSequence name
-    ) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.LONG256:
-                ((Long256BindVariable) function).setValue(l0, l1, l2, l3);
-                break;
-            case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(l0, l1, l2, l3);
-                break;
-            default:
-                reportError(function, ColumnType.LONG256, index, name);
-                break;
-        }
-    }
-
-    private static void setShort0(Function function, short value, int index, @Nullable CharSequence name) throws SqlException {
-        final int functionType = ColumnType.tagOf(function.getType());
-        switch (functionType) {
-            case ColumnType.SHORT:
-                ((ShortBindVariable) function).value = value;
-                break;
-            case ColumnType.INT:
-                ((IntBindVariable) function).value = value;
-                break;
-            case ColumnType.LONG:
-                ((LongBindVariable) function).value = value;
-                break;
-            case ColumnType.TIMESTAMP:
-                ((TimestampBindVariable) function).value = value;
-                break;
-            case ColumnType.DATE:
-                ((DateBindVariable) function).value = value;
-                break;
-            case ColumnType.FLOAT:
-                ((FloatBindVariable) function).value = value;
-                break;
-            case ColumnType.DOUBLE:
-                ((DoubleBindVariable) function).value = value;
-                break;
-            case ColumnType.STRING:
-                ((StrBindVariable) function).setValue(value);
-                break;
-            case ColumnType.BYTE:
-                ((ByteBindVariable) function).value = (byte) value;
-                break;
-            case ColumnType.CHAR:
-                ((CharBindVariable) function).value = (char) value;
-                break;
-            default:
-                reportError(function, ColumnType.SHORT, index, name);
                 break;
         }
     }
@@ -914,8 +810,102 @@ public class BindVariableServiceImpl implements BindVariableService {
             case ColumnType.STRING:
                 ((StrBindVariable) function).setValue(value);
                 break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = SqlUtil.implicitCastAsChar(value, ColumnType.BYTE);
+                break;
             default:
                 reportError(function, ColumnType.BYTE, index, name);
+                break;
+        }
+    }
+
+    private static void setChar0(Function function, char value, int index, @Nullable CharSequence name) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        // treat char as string representation of numeric type
+        switch (functionType) {
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.BYTE);
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.SHORT);
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.INT);
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.LONG);
+                break;
+            case ColumnType.DATE:
+                ((DateBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.DATE);
+                break;
+            case ColumnType.TIMESTAMP:
+                ((TimestampBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.TIMESTAMP);
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.FLOAT);
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = SqlUtil.implicitCastCharAsType(value, ColumnType.DOUBLE);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = value;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.GEOBYTE:
+                ((GeoHashBindVariable) function).value = SqlUtil.implicitCastCharAsGeoHash(value, function.getType());
+                break;
+            default:
+                reportError(function, ColumnType.CHAR, index, name);
+                break;
+        }
+    }
+
+    private static void setDouble0(Function function, double value, int index, @Nullable CharSequence name) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = SqlUtil.implicitCastAsFloat(value, ColumnType.DOUBLE);
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = value;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            default:
+                reportError(function, ColumnType.DOUBLE, index, name);
+                break;
+        }
+    }
+
+    private static void setFloat0(Function function, float value, int index, @Nullable CharSequence name) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = value;
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = value;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            default:
+                reportError(function, ColumnType.FLOAT, index, name);
                 break;
         }
     }
@@ -932,7 +922,7 @@ public class BindVariableServiceImpl implements BindVariableService {
                 if (fromBits == toBits) {
                     ((GeoHashBindVariable) function).value = value;
                 } else if (fromBits > toBits) {
-                    ((GeoHashBindVariable) function).value = ColumnType.truncateGeoHashBits(value, fromBits, toBits);
+                    ((GeoHashBindVariable) function).value = GeoHashes.widen(value, fromBits, toBits);
                 } else if (name != null) {
                     throw SqlException.$(0, "inconvertible types: ")
                             .put(ColumnType.nameOf(type))
@@ -952,79 +942,363 @@ public class BindVariableServiceImpl implements BindVariableService {
         }
     }
 
-    private static void setStr0(Function function, CharSequence value, int index, @Nullable CharSequence name) throws SqlException {
+    private static void setIPv40(Function function, int value) {
+        ((IPv4BindVariable) function).value = value;
+    }
+
+    private static void setInt0(Function function, int value, int index, @Nullable CharSequence name) throws SqlException {
         final int functionType = ColumnType.tagOf(function.getType());
-        try {
-            switch (functionType) {
-                case ColumnType.BOOLEAN:
-                    ((BooleanBindVariable) function).value = SqlKeywords.isTrueKeyword(value);
-                    break;
-                case ColumnType.BYTE:
-                    ((ByteBindVariable) function).value = (byte) Numbers.parseShort(value);
-                    break;
-                case ColumnType.SHORT:
-                    ((ShortBindVariable) function).value = Numbers.parseShort(value);
-                    break;
-                case ColumnType.CHAR:
-                    ((CharBindVariable) function).value = (char) (Chars.nonEmpty(value) ? Numbers.parseShort(value) : 0);
-                    break;
-                case ColumnType.INT:
-                    ((IntBindVariable) function).value = value != null ? Numbers.parseInt(value) : Numbers.INT_NaN;
-                    break;
-                case ColumnType.LONG:
-                    ((LongBindVariable) function).value = value != null ? Numbers.parseLong(value) : Numbers.LONG_NaN;
-                    break;
-                case ColumnType.TIMESTAMP:
-                    ((TimestampBindVariable) function).value = value != null ? parseTimestamp(value) : Numbers.LONG_NaN;
-                    break;
-                case ColumnType.DATE:
-                    ((DateBindVariable) function).value = value != null ? parseDate(value) : Numbers.LONG_NaN;
-                    break;
-                case ColumnType.FLOAT:
-                    ((FloatBindVariable) function).value = value != null ? Numbers.parseFloat(value) : Float.NaN;
-                    break;
-                case ColumnType.DOUBLE:
-                    ((DoubleBindVariable) function).value = value != null ? Numbers.parseDouble(value) : Double.NaN;
-                    break;
-                case ColumnType.STRING:
-                    ((StrBindVariable) function).setValue(value);
-                    break;
-                case ColumnType.LONG256:
-                    if (value != null) {
-                        Long256FromCharSequenceDecoder.decode(value, 0, value.length(), ((Long256BindVariable) function).value);
-                    } else {
-                        ((Long256BindVariable) function).value.copyFrom(Long256Impl.NULL_LONG256);
-                    }
-                    break;
-                default:
-                    reportError(function, ColumnType.STRING, index, name);
-                    break;
-            }
-        } catch (NumericException e) {
-            throw SqlException.$(0, "could not parse [value='").put(value).put("', as=").put(ColumnType.nameOf(functionType)).put(", index=").put(index).put(']');
+        switch (functionType) {
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = value != Numbers.INT_NULL ? SqlUtil.implicitCastAsByte(value, ColumnType.INT) : 0;
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = value != Numbers.INT_NULL ? SqlUtil.implicitCastAsShort(value, ColumnType.INT) : 0;
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = value;
+                break;
+            case ColumnType.IPv4:
+                ((IPv4BindVariable) function).value = value != Numbers.INT_NULL ? value : Numbers.IPv4_NULL;
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = value != Numbers.INT_NULL ? value : Numbers.LONG_NULL;
+                break;
+            case ColumnType.TIMESTAMP:
+                ((TimestampBindVariable) function).value = value != Numbers.INT_NULL ? value : Numbers.LONG_NULL;
+                break;
+            case ColumnType.DATE:
+                ((DateBindVariable) function).value = value != Numbers.INT_NULL ? value : Numbers.LONG_NULL;
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = value != Numbers.INT_NULL ? value : Float.NaN;
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = value != Numbers.INT_NULL ? value : Double.NaN;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = value != Numbers.INT_NULL ? SqlUtil.implicitCastAsChar(value, ColumnType.INT) : 0;
+                break;
+            default:
+                reportError(function, ColumnType.INT, index, name);
+                break;
         }
     }
 
-    static {
-        final DateFormatCompiler milliCompiler = new DateFormatCompiler();
-        final DateFormat pgDateTimeFormat = milliCompiler.compile("y-MM-dd HH:mm:ssz");
+    private static void setLong0(Function function, long value, int index, @Nullable CharSequence name, int srcType) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsByte(value, ColumnType.LONG) : 0;
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsShort(value, ColumnType.LONG) : 0;
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsInt(value, ColumnType.LONG) : Numbers.INT_NULL;
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = value;
+                break;
+            case ColumnType.TIMESTAMP:
+                ((TimestampBindVariable) function).value = value;
+                break;
+            case ColumnType.DATE:
+                ((DateBindVariable) function).value = value;
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = value != Numbers.LONG_NULL ? value : Float.NaN;
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = value != Numbers.LONG_NULL ? value : Double.NaN;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsChar(value, ColumnType.LONG) : 0;
+                break;
+            default:
+                reportError(function, srcType, index, name);
+                break;
+        }
+    }
 
-        DATE_FORMATS = new DateFormat[]{
-                pgDateTimeFormat,
-                PG_DATE_Z_FORMAT,
-                PG_DATE_MILLI_TIME_Z_FORMAT,
-                UTC_FORMAT
-        };
+    private static void setLong2560(
+            Function function,
+            long l0,
+            long l1,
+            long l2,
+            long l3,
+            int index,
+            @Nullable CharSequence name
+    ) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.LONG256:
+                ((Long256BindVariable) function).setValue(l0, l1, l2, l3);
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(l0, l1, l2, l3);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(l0, l1, l2, l3);
+                break;
+            default:
+                reportError(function, ColumnType.LONG256, index, name);
+                break;
+        }
+    }
 
-        DATE_FORMATS_SIZE = DATE_FORMATS.length;
+    private static void setShort0(Function function, short value, int index, @Nullable CharSequence name) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = SqlUtil.implicitCastAsByte(value, ColumnType.SHORT);
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = value;
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = value;
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = value;
+                break;
+            case ColumnType.TIMESTAMP:
+                ((TimestampBindVariable) function).value = value;
+                break;
+            case ColumnType.DATE:
+                ((DateBindVariable) function).value = value;
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = value;
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = value;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = SqlUtil.implicitCastAsChar(value, ColumnType.SHORT);
+                break;
+            default:
+                reportError(function, ColumnType.SHORT, index, name);
+                break;
+        }
+    }
 
-        // we are using "millis" compiler deliberately because clients encode millis into strings
-        TIMESTAMP_FORMATS = new DateFormat[]{
-                PG_DATE_Z_FORMAT,
-                PG_DATE_MILLI_TIME_Z_FORMAT,
-                pgDateTimeFormat
-        };
+    private static void setStr0(Function function, CharSequence value, int index, @Nullable CharSequence name) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.BOOLEAN:
+                ((BooleanBindVariable) function).value = value != null && SqlKeywords.isTrueKeyword(value);
+                break;
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = SqlUtil.implicitCastStrAsByte(value);
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = SqlUtil.implicitCastStrAsShort(value);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = SqlUtil.implicitCastStrAsChar(value);
+                break;
+            case ColumnType.IPv4:
+                ((IPv4BindVariable) function).value = SqlUtil.implicitCastStrAsIPv4(value);
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = SqlUtil.implicitCastStrAsInt(value);
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = SqlUtil.implicitCastStrAsLong(value);
+                break;
+            case ColumnType.TIMESTAMP:
+                ((TimestampBindVariable) function).value = SqlUtil.implicitCastStrAsTimestamp(value);
+                break;
+            case ColumnType.DATE:
+                ((DateBindVariable) function).value = SqlUtil.implicitCastStrAsDate(value);
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = SqlUtil.implicitCastStrAsFloat(value);
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = SqlUtil.implicitCastStrAsDouble(value);
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.LONG256:
+                SqlUtil.implicitCastStrAsLong256(value, ((Long256BindVariable) function).value);
+                break;
+            case ColumnType.UUID:
+                SqlUtil.implicitCastStrAsUuid(value, ((UuidBindVariable) function).value);
+                break;
+            default:
+                reportError(function, ColumnType.STRING, index, name);
+                break;
+        }
+    }
 
-        TIMESTAMP_FORMATS_SIZE = TIMESTAMP_FORMATS.length;
+    private static void setTimestamp0(Function function, long value, int index) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsByte(value, ColumnType.TIMESTAMP) : 0;
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsShort(value, ColumnType.TIMESTAMP) : 0;
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = value != Numbers.LONG_NULL ? SqlUtil.implicitCastAsInt(value, ColumnType.TIMESTAMP) : Numbers.INT_NULL;
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = value;
+                break;
+            case ColumnType.TIMESTAMP:
+                ((TimestampBindVariable) function).value = value;
+                break;
+            case ColumnType.DATE:
+                ((DateBindVariable) function).value = value != Numbers.LONG_NULL ? value / 1000 : value;
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = value != Numbers.LONG_NULL ? value : Float.NaN;
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = value != Numbers.LONG_NULL ? value : Double.NaN;
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setTimestamp(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setTimestamp(value);
+                break;
+            default:
+                reportError(function, ColumnType.TIMESTAMP, index, null);
+                break;
+        }
+    }
+
+    private static void setUuid(Function function, long lo, long hi, int index, @Nullable CharSequence name) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.UUID:
+                ((UuidBindVariable) function).set(lo, hi);
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setUuidValue(lo, hi);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setUuidValue(lo, hi);
+                break;
+            default:
+                reportError(function, ColumnType.UUID, index, name);
+                break;
+        }
+    }
+
+    private static void setVarchar0(
+            Function function,
+            @Transient Utf8Sequence value,
+            int index,
+            @Nullable CharSequence name
+    ) throws SqlException {
+        final int functionType = ColumnType.tagOf(function.getType());
+        switch (functionType) {
+            case ColumnType.BOOLEAN:
+                ((BooleanBindVariable) function).value = SqlKeywords.isTrueKeyword(value);
+                break;
+            case ColumnType.BYTE:
+                ((ByteBindVariable) function).value = SqlUtil.implicitCastVarcharAsByte(value);
+                break;
+            case ColumnType.SHORT:
+                ((ShortBindVariable) function).value = SqlUtil.implicitCastVarcharAsShort(value);
+                break;
+            case ColumnType.CHAR:
+                ((CharBindVariable) function).value = SqlUtil.implicitCastVarcharAsChar(value);
+                break;
+            case ColumnType.IPv4:
+                ((IPv4BindVariable) function).value = SqlUtil.implicitCastStrAsIPv4(value);
+                break;
+            case ColumnType.INT:
+                ((IntBindVariable) function).value = SqlUtil.implicitCastVarcharAsInt(value);
+                break;
+            case ColumnType.LONG:
+                ((LongBindVariable) function).value = SqlUtil.implicitCastVarcharAsLong(value);
+                break;
+            case ColumnType.TIMESTAMP:
+            case ColumnType.DATE:
+            case ColumnType.LONG256:
+                CharSequence charSeq;
+                if (value.isAscii()) {
+                    charSeq = value.asAsciiCharSequence();
+                } else {
+                    StringSink sink = Misc.getThreadLocalSink();
+                    sink.clear();
+                    if (!Utf8s.utf8ToUtf16(value, sink)) {
+                        throw SqlException.position(0).put("Could not update bind variable. Invalid UTF-8 encoding.");
+                    }
+                    charSeq = sink;
+                }
+                switch (functionType) {
+                    case ColumnType.TIMESTAMP:
+                        ((TimestampBindVariable) function).value = SqlUtil.implicitCastVarcharAsTimestamp(charSeq);
+                        break;
+                    case ColumnType.DATE:
+                        ((DateBindVariable) function).value = SqlUtil.implicitCastVarcharAsDate(charSeq);
+                        break;
+                    case ColumnType.LONG256:
+                        SqlUtil.implicitCastStrAsLong256(charSeq, ((Long256BindVariable) function).value);
+                        break;
+                }
+                break;
+            case ColumnType.FLOAT:
+                ((FloatBindVariable) function).value = SqlUtil.implicitCastVarcharAsFloat(value);
+                break;
+            case ColumnType.DOUBLE:
+                ((DoubleBindVariable) function).value = SqlUtil.implicitCastVarcharAsDouble(value);
+                break;
+            case ColumnType.STRING:
+                ((StrBindVariable) function).setValue(value);
+                break;
+            case ColumnType.VARCHAR:
+                ((VarcharBindVariable) function).setValue(value);
+                break;
+            case ColumnType.UUID:
+                SqlUtil.implicitCastStrAsUuid(value, ((UuidBindVariable) function).value);
+                break;
+            default:
+                reportError(function, ColumnType.VARCHAR, index, name);
+                break;
+        }
+    }
+
+    private void setUndefined(int index) {
+        indexedVariables.extendPos(index + 1);
+        // variable exists
+        Function function = indexedVariables.getQuick(index);
+        if (function != null) {
+            if (function.getType() != ColumnType.UNDEFINED) {
+                Misc.free(function);
+                indexedVariables.extendAndSet(index, UndefinedFunction.INSTANCE);
+            }
+        } else {
+            indexedVariables.extendAndSet(index, UndefinedFunction.INSTANCE);
+        }
     }
 }

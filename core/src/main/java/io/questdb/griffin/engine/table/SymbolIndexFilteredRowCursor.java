@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,33 +24,27 @@
 
 package io.questdb.griffin.engine.table;
 
-import io.questdb.cairo.TableReader;
-import io.questdb.cairo.TableReaderSelectedColumnRecord;
 import io.questdb.cairo.TableUtils;
-import io.questdb.cairo.sql.DataFrame;
-import io.questdb.cairo.sql.Function;
-import io.questdb.cairo.sql.RowCursor;
-import io.questdb.std.IntList;
+import io.questdb.cairo.sql.*;
 
 class SymbolIndexFilteredRowCursor implements RowCursor {
-    private final Function filter;
-    private final TableReaderSelectedColumnRecord record;
-    private final int columnIndex;
     private final boolean cachedIndexReaderCursor;
-    private int symbolKey;
-    private RowCursor rowCursor;
-    private long rowid;
+    private final int columnIndex;
+    private final Function filter;
     private final int indexDirection;
+    private final PageFrameMemoryRecord record;
+    private RowCursor rowCursor;
+    private long rowIndex;
+    private int symbolKey;
 
     public SymbolIndexFilteredRowCursor(
             int columnIndex,
             int symbolKey,
             Function filter,
             boolean cachedIndexReaderCursor,
-            int indexDirection,
-            IntList columnIndexes
+            int indexDirection
     ) {
-        this(columnIndex, filter, cachedIndexReaderCursor, indexDirection, columnIndexes);
+        this(columnIndex, filter, cachedIndexReaderCursor, indexDirection);
         of(symbolKey);
     }
 
@@ -58,23 +52,22 @@ class SymbolIndexFilteredRowCursor implements RowCursor {
             int columnIndex,
             Function filter,
             boolean cachedIndexReaderCursor,
-            int indexDirection,
-            IntList columnIndexes
+            int indexDirection
     ) {
         this.columnIndex = columnIndex;
         this.filter = filter;
         this.cachedIndexReaderCursor = cachedIndexReaderCursor;
         this.indexDirection = indexDirection;
-        this.record = new TableReaderSelectedColumnRecord(columnIndexes);
+        this.record = new PageFrameMemoryRecord(PageFrameMemoryRecord.RECORD_A_LETTER);
     }
 
     @Override
     public boolean hasNext() {
         while (rowCursor.hasNext()) {
-            final long rowid = rowCursor.next();
-            record.setRecordIndex(rowid);
+            final long rowIndex = rowCursor.next();
+            record.setRowIndex(rowIndex);
             if (filter.getBool(record)) {
-                this.rowid = rowid;
+                this.rowIndex = rowIndex;
                 return true;
             }
         }
@@ -83,22 +76,35 @@ class SymbolIndexFilteredRowCursor implements RowCursor {
 
     @Override
     public long next() {
-        return rowid;
+        return rowIndex;
     }
 
-    public final void of(int symbolKey) {
+    public void of(int symbolKey) {
         this.symbolKey = TableUtils.toIndexKey(symbolKey);
     }
 
-    public SymbolIndexFilteredRowCursor of(DataFrame dataFrame) {
-        this.rowCursor = dataFrame
+    public SymbolIndexFilteredRowCursor of(PageFrame pageFrame, PageFrameMemory pageFrameMemory) {
+        this.rowCursor = pageFrame
                 .getBitmapIndexReader(columnIndex, indexDirection)
-                .getCursor(cachedIndexReaderCursor, symbolKey, dataFrame.getRowLo(), dataFrame.getRowHi() - 1);
-        record.jumpTo(dataFrame.getPartitionIndex(), 0);
+                .getCursor(cachedIndexReaderCursor, symbolKey, pageFrame.getPartitionLo(), pageFrame.getPartitionHi() - 1);
+        record.init(pageFrameMemory);
+        record.setRowIndex(0);
         return this;
     }
 
-    void prepare(TableReader tableReader) {
-        this.record.of(tableReader);
+    Function getFilter() {
+        return filter;
+    }
+
+    int getIndexDirection() {
+        return indexDirection;
+    }
+
+    int getSymbolKey() {
+        return symbolKey;
+    }
+
+    void prepare(PageFrameCursor pageFrameCursor) {
+        record.of(pageFrameCursor);
     }
 }

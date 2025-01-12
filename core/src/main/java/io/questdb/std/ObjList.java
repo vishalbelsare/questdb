@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,11 +25,13 @@
 package io.questdb.std;
 
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import org.jetbrains.annotations.NotNull;
 
 import java.util.Arrays;
 import java.util.Comparator;
 
-public class ObjList<T> implements Mutable, Sinkable {
+public class ObjList<T> implements Mutable, Sinkable, ReadOnlyObjList<T> {
     private static final int DEFAULT_ARRAY_SIZE = 16;
     private T[] buffer;
     private int pos = 0;
@@ -40,10 +42,17 @@ public class ObjList<T> implements Mutable, Sinkable {
     }
 
     @SuppressWarnings("unchecked")
-    public ObjList(ObjList<T> other) {
+    public ObjList(ObjList<? extends T> other) {
         this.buffer = (T[]) new Object[Math.max(other.size(), DEFAULT_ARRAY_SIZE)];
         setPos(other.size());
         System.arraycopy(other.buffer, 0, this.buffer, 0, pos);
+    }
+
+    @SuppressWarnings("unchecked")
+    public ObjList(T... other) {
+        this.buffer = (T[]) new Object[Math.max(other.length, DEFAULT_ARRAY_SIZE)];
+        setPos(other.length);
+        System.arraycopy(other, 0, this.buffer, 0, pos);
     }
 
     @SuppressWarnings("unchecked")
@@ -51,34 +60,29 @@ public class ObjList<T> implements Mutable, Sinkable {
         this.buffer = (T[]) new Object[Math.max(capacity, DEFAULT_ARRAY_SIZE)];
     }
 
-    /**
-     * {@inheritDoc}
-     */
     public void add(T value) {
-        ensureCapacity(pos + 1);
+        checkCapacity(pos + 1);
         buffer[pos++] = value;
     }
 
-    public void addAll(ObjList<T> that) {
+    public void addAll(ReadOnlyObjList<? extends T> that) {
         int n = that.size();
-        ensureCapacity(pos + n);
+        checkCapacity(pos + n);
         for (int i = 0; i < n; i++) {
             buffer[pos++] = that.getQuick(i);
         }
     }
 
-    /**
-     * {@inheritDoc}
-     */
-    public void clear() {
-        if (pos > 0) {
-            Arrays.fill(buffer, null);
+    public void addAll(ReadOnlyObjList<? extends T> that, int lo, int hi) {
+        int n = hi - lo;
+        checkCapacity(pos + n);
+        for (int i = lo; i < hi; i++) {
+            buffer[pos++] = that.getQuick(i);
         }
-        pos = 0;
     }
 
     @SuppressWarnings("unchecked")
-    public void ensureCapacity(int capacity) {
+    public void checkCapacity(int capacity) {
         int l = buffer.length;
         if (capacity > l) {
             int newCap = Math.max(l << 1, capacity);
@@ -88,8 +92,36 @@ public class ObjList<T> implements Mutable, Sinkable {
         }
     }
 
+    @Override
+    public void clear() {
+        if (pos > 0) {
+            Arrays.fill(buffer, null);
+        }
+        pos = 0;
+    }
+
+    public boolean contains(T value) {
+        for (int i = 0, n = pos; i < n; i++) {
+            T o = getQuick(i);
+            if ((value == null && o == null) ||
+                    (value != null && value.equals(o))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean equals(Object that) {
+        return this == that || that instanceof ObjList && equals((ObjList<?>) that);
+    }
+
     public void extendAndSet(int index, T value) {
-        ensureCapacity(index + 1);
+        checkCapacity(index + 1);
         if (index >= pos) {
             pos = index + 1;
         }
@@ -97,13 +129,11 @@ public class ObjList<T> implements Mutable, Sinkable {
     }
 
     public void extendPos(int capacity) {
-        ensureCapacity(capacity);
+        checkCapacity(capacity);
         pos = Math.max(pos, capacity);
     }
 
-    /**
-     * {@inheritDoc}
-     */
+    @Override
     public T get(int index) {
         if (index < pos) {
             return buffer[index];
@@ -112,7 +142,7 @@ public class ObjList<T> implements Mutable, Sinkable {
     }
 
     public T getAndSetQuick(int index, T value) {
-        assert index < pos;
+        assert index < pos : "index out of bounds, " + index + " >= " + pos;
         T v = buffer[index];
         buffer[index] = value;
         return v;
@@ -123,6 +153,7 @@ public class ObjList<T> implements Mutable, Sinkable {
      *
      * @return last element of the list
      */
+    @Override
     public T getLast() {
         if (pos > 0) {
             return buffer[pos - 1];
@@ -133,14 +164,15 @@ public class ObjList<T> implements Mutable, Sinkable {
     /**
      * Returns element at the specified position. This method does not do
      * bounds check and may cause memory corruption if index is out of bounds.
-     * Instead the responsibility to check bounds is placed on application code,
+     * Instead, the responsibility to check bounds is placed on application code,
      * which is often the case anyway, for example in indexed for() loop.
      *
      * @param index of the element
      * @return element at the specified position.
      */
+    @Override
     public T getQuick(int index) {
-        assert index < pos;
+        assert index < pos : "index out of bounds, " + index + " >= " + pos;
         return buffer[index];
     }
 
@@ -152,6 +184,7 @@ public class ObjList<T> implements Mutable, Sinkable {
      * @param index position of element
      * @return element at the specified position.
      */
+    @Override
     public T getQuiet(int index) {
         if (index < pos) {
             return buffer[index];
@@ -172,36 +205,7 @@ public class ObjList<T> implements Mutable, Sinkable {
         return hashCode;
     }
 
-    /**
-     * {@inheritDoc}
-     */
     @Override
-    public boolean equals(Object that) {
-        return this == that || that instanceof ObjList && equals((ObjList<?>) that);
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public String toString() {
-        StringBuilder b = new StringBuilder();
-
-        b.setLength(0);
-        b.append('[');
-        for (int i = 0, k = size(); i < k; i++) {
-            if (i > 0) {
-                b.append(',');
-            }
-            b.append(getQuick(i));
-        }
-        b.append(']');
-        return b.toString();
-    }
-
-    /**
-     * {@inheritDoc}
-     */
     public int indexOf(Object o) {
         if (o == null) {
             return indexOfNull();
@@ -215,11 +219,34 @@ public class ObjList<T> implements Mutable, Sinkable {
         }
     }
 
-    public void insert(int index, int length) {
-        ensureCapacity(pos + length);
+    public int indexOfNull() {
+        for (int i = 0, n = pos; i < n; i++) {
+            if (null == getQuick(i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    public int indexOfRef(Object o) {
+        if (o == null) {
+            return indexOfNull();
+        } else {
+            for (int i = 0, n = pos; i < n; i++) {
+                if (o == getQuick(i)) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+    }
+
+    public void insert(int index, int length, T defaultValue) {
+        checkCapacity(pos + length);
         if (pos > index) {
             System.arraycopy(buffer, index, buffer, index + length, pos - index);
         }
+        Arrays.fill(buffer, index, index + length, defaultValue);
         pos += length;
     }
 
@@ -235,7 +262,7 @@ public class ObjList<T> implements Mutable, Sinkable {
     }
 
     public void remove(int from, int to) {
-        assert from <= to;
+        assert from <= to : "start index is greater than end index, " + from + " > " + to;
         int move = pos - from - (to - from) - 1;
         if (move > 0) {
             System.arraycopy(buffer, to + 1, buffer, from, move);
@@ -264,25 +291,26 @@ public class ObjList<T> implements Mutable, Sinkable {
         buffer[index] = value;
     }
 
-    public void setAll(int capacity, T value) {
-        ensureCapacity(capacity);
-        pos = capacity;
+    public void setAll(int count, T value) {
+        checkCapacity(count);
+        pos = count;
         Arrays.fill(buffer, value);
     }
 
-    public void setPos(int capacity) {
-        ensureCapacity(capacity);
-        pos = capacity;
+    public void setPos(int newPos) {
+        checkCapacity(newPos);
+        pos = newPos;
     }
 
     public void setQuick(int index, T value) {
-        assert index < pos;
+        assert index < pos : "index out of bounds, " + index + " >= " + pos;
         buffer[index] = value;
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public int size() {
         return pos;
     }
@@ -296,22 +324,49 @@ public class ObjList<T> implements Mutable, Sinkable {
     }
 
     @Override
-    public void toSink(CharSink sink) {
-        sink.put('[');
-        for (int i = 0, k = size(); i < k; i++) {
-            if (i > 0) {
-                sink.put(',');
+    public void toSink(@NotNull CharSink<?> sink) {
+        toSink(sink, 0, size());
+    }
+
+    public void toSink(CharSink<?> sink, int from) {
+        toSink(sink, from, size());
+    }
+
+    public void toSink(CharSink<?> sink, int from, int to) {
+        sink.putAscii('[');
+        for (int i = from; i < to; i++) {
+            if (i > from) {
+                sink.putAscii(',');
             }
             T obj = getQuick(i);
             if (obj instanceof Sinkable) {
                 sink.put((Sinkable) obj);
             } else if (obj == null) {
-                sink.put("null");
+                sink.putAscii("null");
             } else {
                 sink.put(obj.toString());
             }
         }
-        sink.put(']');
+        sink.putAscii(']');
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString() {
+        StringBuilder b = new StringBuilder();
+
+        b.setLength(0);
+        b.append('[');
+        for (int i = 0, k = size(); i < k; i++) {
+            if (i > 0) {
+                b.append(',');
+            }
+            b.append(getQuick(i));
+        }
+        b.append(']');
+        return b.toString();
     }
 
     private boolean equals(ObjList<?> that) {
@@ -319,21 +374,16 @@ public class ObjList<T> implements Mutable, Sinkable {
             for (int i = 0, n = pos; i < n; i++) {
                 Object lhs = this.getQuick(i);
                 if (lhs == null) {
-                    return that.getQuick(i) == null;
-                } else if (lhs.equals(that.getQuick(i))) {
-                    return true;
+                    if (that.getQuick(i) != null) {
+                        return false;
+                    }
+                } else if (!lhs.equals(that.getQuick(i))) {
+                    return false;
                 }
             }
+
+            return true;
         }
         return false;
-    }
-
-    private int indexOfNull() {
-        for (int i = 0, n = pos; i < n; i++) {
-            if (null == getQuick(i)) {
-                return i;
-            }
-        }
-        return -1;
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,12 +26,13 @@ package io.questdb.griffin.engine.functions.date;
 
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.TimestampFunction;
 import io.questdb.griffin.engine.functions.UnaryFunction;
 
 class OffsetTimestampFunctionFromOffset extends TimestampFunction implements UnaryFunction {
-    private final Function timestamp;
     private final long offset;
+    private final Function timestamp;
 
     public OffsetTimestampFunctionFromOffset(Function timestamp, long offset) {
         this.timestamp = timestamp;
@@ -46,5 +47,10 @@ class OffsetTimestampFunctionFromOffset extends TimestampFunction implements Una
     @Override
     public long getTimestamp(Record rec) {
         return timestamp.getTimestamp(rec) + offset;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.val(timestamp).val('+').val(offset);
     }
 }

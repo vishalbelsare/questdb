@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 package io.questdb.griffin.engine.functions.constants;
 
 import io.questdb.cairo.sql.Record;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.DoubleFunction;
 
 public class DoubleConstant extends DoubleFunction implements ConstantFunction {
@@ -37,11 +38,23 @@ public class DoubleConstant extends DoubleFunction implements ConstantFunction {
     }
 
     public static DoubleConstant newInstance(double value) {
-        return  value == value ? new DoubleConstant(value) : DoubleConstant.NULL;
+        return value == value ? new DoubleConstant(value) : DoubleConstant.NULL;
     }
 
     @Override
     public double getDouble(Record rec) {
         return value;
+    }
+
+    @Override
+    public boolean isNullConstant() {
+        // NaN is used as a marker for NULL
+        // we can't use value != value because it will always be false
+        return value != value;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.val(value);
     }
 }

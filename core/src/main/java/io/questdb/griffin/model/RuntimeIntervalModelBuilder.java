@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -46,18 +46,17 @@ import io.questdb.std.ObjList;
  * and the index when it happens stored in pureStaticCount
  */
 public class RuntimeIntervalModelBuilder implements Mutable {
+    private final ObjList<Function> dynamicRangeList = new ObjList<>();
     // All data needed to re-evaluate intervals
     // is stored in 2 lists - ListLong and List of functions
     // ListLongs has STATIC_LONGS_PER_DYNAMIC_INTERVAL entries per 1 dynamic interval
     // and pairs of static intervals in the end
     private final LongList staticIntervals = new LongList();
-    private final ObjList<Function> dynamicRangeList = new ObjList<>();
-    private boolean intervalApplied = false;
-
     private long betweenBoundary;
     private Function betweenBoundaryFunc;
     private boolean betweenBoundarySet;
     private boolean betweenNegated;
+    private boolean intervalApplied = false;
 
     public RuntimeIntrinsicIntervalModel build() {
         return new RuntimeIntervalModel(new LongList(staticIntervals), new ObjList<>(dynamicRangeList));
@@ -74,7 +73,7 @@ public class RuntimeIntervalModelBuilder implements Mutable {
     public void clearBetweenParsing() {
         betweenBoundarySet = false;
         betweenBoundaryFunc = null;
-        betweenBoundary = Numbers.LONG_NaN;
+        betweenBoundary = Numbers.LONG_NULL;
     }
 
     public boolean hasIntervalFilters() {
@@ -82,7 +81,9 @@ public class RuntimeIntervalModelBuilder implements Mutable {
     }
 
     public void intersect(long lo, Function hi, short adjustment) {
-        if (isEmptySet()) return;
+        if (isEmptySet()) {
+            return;
+        }
 
         IntervalUtils.addHiLoInterval(lo, 0, adjustment, IntervalDynamicIndicator.IS_HI_DYNAMIC, IntervalOperation.INTERSECT, staticIntervals);
         dynamicRangeList.add(hi);
@@ -90,7 +91,9 @@ public class RuntimeIntervalModelBuilder implements Mutable {
     }
 
     public void intersect(Function lo, long hi, short adjustment) {
-        if (isEmptySet()) return;
+        if (isEmptySet()) {
+            return;
+        }
 
         IntervalUtils.addHiLoInterval(0, hi, adjustment, IntervalDynamicIndicator.IS_LO_DYNAMIC, IntervalOperation.INTERSECT, staticIntervals);
         dynamicRangeList.add(lo);
@@ -98,11 +101,14 @@ public class RuntimeIntervalModelBuilder implements Mutable {
     }
 
     public void intersect(long lo, long hi) {
-        if (isEmptySet()) return;
+        if (isEmptySet()) {
+            return;
+        }
+
         if (dynamicRangeList.size() == 0) {
             staticIntervals.add(lo, hi);
             if (intervalApplied) {
-                IntervalUtils.intersectInplace(staticIntervals, staticIntervals.size() - 2);
+                IntervalUtils.intersectInPlace(staticIntervals, staticIntervals.size() - 2);
             }
         } else {
             IntervalUtils.addHiLoInterval(lo, hi, IntervalOperation.INTERSECT, staticIntervals);
@@ -111,15 +117,71 @@ public class RuntimeIntervalModelBuilder implements Mutable {
         intervalApplied = true;
     }
 
-    public void intersectDynamicInterval(Function intervalStrFunction) {
-        if (isEmptySet()) return;
-        IntervalUtils.addHiLoInterval(0L, 0L, IntervalOperation.INTERSECT_INTERVALS, staticIntervals);
-        dynamicRangeList.add(intervalStrFunction);
+    public void intersectEmpty() {
+        clear();
         intervalApplied = true;
     }
 
-    public void setBetweenNegated(boolean isNegated) {
-        betweenNegated = isNegated;
+    public void intersectIntervals(CharSequence seq, int lo, int lim, int position) throws SqlException {
+        if (isEmptySet()) {
+            return;
+        }
+
+        int size = staticIntervals.size();
+        IntervalUtils.parseIntervalEx(seq, lo, lim, position, staticIntervals, IntervalOperation.INTERSECT);
+        if (dynamicRangeList.size() == 0) {
+            IntervalUtils.applyLastEncodedIntervalEx(staticIntervals);
+            if (intervalApplied) {
+                IntervalUtils.intersectInPlace(staticIntervals, size);
+            }
+        } else {
+            // else - nothing to do, interval already encoded in staticPeriods as 4 longs
+            dynamicRangeList.add(null);
+        }
+        intervalApplied = true;
+    }
+
+    public void intersectRuntimeIntervals(Function intervalFunction) {
+        if (isEmptySet()) {
+            return;
+        }
+
+        IntervalUtils.addHiLoInterval(0L, 0L, IntervalOperation.INTERSECT_INTERVALS, staticIntervals);
+        dynamicRangeList.add(intervalFunction);
+        intervalApplied = true;
+    }
+
+    public void intersectRuntimeTimestamp(Function function) {
+        if (isEmptySet()) {
+            return;
+        }
+
+        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_HI_DYNAMIC, IntervalOperation.INTERSECT, staticIntervals);
+        dynamicRangeList.add(function);
+        intervalApplied = true;
+    }
+
+    public void intersectTimestamp(CharSequence seq, int lo, int lim, int position) throws SqlException {
+        if (isEmptySet()) {
+            return;
+        }
+
+        int size = staticIntervals.size();
+        IntervalUtils.parseSingleTimestamp(seq, lo, lim, position, staticIntervals, IntervalOperation.INTERSECT);
+        if (dynamicRangeList.size() == 0) {
+            IntervalUtils.applyLastEncodedIntervalEx(staticIntervals);
+            if (intervalApplied) {
+                IntervalUtils.intersectInPlace(staticIntervals, size);
+            }
+        } else {
+            // else - nothing to do, interval already encoded in staticPeriods as 4 longs
+            dynamicRangeList.add(null);
+        }
+        intervalApplied = true;
+    }
+
+    public boolean isEmptySet() {
+        return intervalApplied && staticIntervals.size() == 0;
     }
 
     public void setBetweenBoundary(long timestamp) {
@@ -131,14 +193,14 @@ public class RuntimeIntervalModelBuilder implements Mutable {
                 // Constant interval
                 long lo = Math.min(timestamp, betweenBoundary);
                 long hi = Math.max(timestamp, betweenBoundary);
-                if (hi == Numbers.LONG_NaN || lo == Numbers.LONG_NaN) {
+                if (hi == Numbers.LONG_NULL || lo == Numbers.LONG_NULL) {
                     if (!betweenNegated) {
                         intersectEmpty();
                     }
                     // else {
-                        // NOT BETWEEN with NULL
-                        // to be consistent with non-designated filtering
-                        // do no filtering
+                    // NOT BETWEEN with NULL
+                    // to be consistent with non-designated filtering
+                    // do no filtering
                     //  }
                 } else {
                     if (!betweenNegated) {
@@ -168,47 +230,74 @@ public class RuntimeIntervalModelBuilder implements Mutable {
         }
     }
 
-    public void subtractRuntimeInterval(Function intervalStrFunction) {
-        if (isEmptySet()) return;
-        IntervalUtils.addHiLoInterval(0L, 0L, IntervalOperation.SUBTRACT_INTERVALS, staticIntervals);
-        dynamicRangeList.add(intervalStrFunction);
-        intervalApplied = true;
+    public void setBetweenNegated(boolean isNegated) {
+        betweenNegated = isNegated;
     }
 
-    private void intersectBetweenSemiDynamic(Function funcValue, long constValue) {
-        if (constValue == Numbers.LONG_NaN) {
-            if (!betweenNegated) {
-                intersectEmpty();
-            }
-           // else {
-                // NOT BETWEEN with NULL
-                // to be consistent with non-designated filtering
-                // do no filtering
-            // }
+    public void subtractEquals(Function function) {
+        if (isEmptySet()) {
             return;
         }
 
-        if (isEmptySet()) return;
-
-        short operation = betweenNegated ? IntervalOperation.SUBTRACT_BETWEEN : IntervalOperation.INTERSECT_BETWEEN;
-        IntervalUtils.addHiLoInterval(constValue, 0, (short) 0, IntervalDynamicIndicator.IS_HI_DYNAMIC, operation, staticIntervals);
-        dynamicRangeList.add(funcValue);
+        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_HI_DYNAMIC, IntervalOperation.SUBTRACT, staticIntervals);
+        dynamicRangeList.add(function);
         intervalApplied = true;
     }
 
-    private void intersectBetweenDynamic(Function funcValue1, Function funcValue2) {
-        if (isEmptySet()) return;
+    public void subtractInterval(long lo, long hi) {
+        if (isEmptySet()) {
+            return;
+        }
 
-        short operation = betweenNegated ? IntervalOperation.SUBTRACT_BETWEEN : IntervalOperation.INTERSECT_BETWEEN;
-        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_SEPARATE_DYNAMIC, operation, staticIntervals);
-        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_SEPARATE_DYNAMIC, operation, staticIntervals);
-        dynamicRangeList.add(funcValue1);
-        dynamicRangeList.add(funcValue2);
+        if (dynamicRangeList.size() == 0) {
+            int size = staticIntervals.size();
+            staticIntervals.add(lo, hi);
+            IntervalUtils.invert(staticIntervals, size);
+            if (intervalApplied) {
+                IntervalUtils.intersectInPlace(staticIntervals, size);
+            }
+        } else {
+            IntervalUtils.addHiLoInterval(lo, hi, IntervalOperation.SUBTRACT, staticIntervals);
+            dynamicRangeList.add(null);
+        }
+        intervalApplied = true;
+    }
+
+    public void subtractIntervals(CharSequence seq, int lo, int lim, int position) throws SqlException {
+        if (isEmptySet()) {
+            return;
+        }
+
+        int size = staticIntervals.size();
+        IntervalUtils.parseIntervalEx(seq, lo, lim, position, staticIntervals, IntervalOperation.SUBTRACT);
+        if (dynamicRangeList.size() == 0) {
+            IntervalUtils.applyLastEncodedIntervalEx(staticIntervals);
+            IntervalUtils.invert(staticIntervals, size);
+            if (intervalApplied) {
+                IntervalUtils.intersectInPlace(staticIntervals, size);
+            }
+        } else {
+            // else - nothing to do, interval already encoded in staticPeriods as 4 longs
+            dynamicRangeList.add(null);
+        }
+        intervalApplied = true;
+    }
+
+    public void subtractRuntimeIntervals(Function intervalFunction) {
+        if (isEmptySet()) {
+            return;
+        }
+
+        IntervalUtils.addHiLoInterval(0L, 0L, IntervalOperation.SUBTRACT_INTERVALS, staticIntervals);
+        dynamicRangeList.add(intervalFunction);
         intervalApplied = true;
     }
 
     public void union(long lo, long hi) {
-        if (isEmptySet()) return;
+        if (isEmptySet()) {
+            return;
+        }
+
         if (dynamicRangeList.size() == 0) {
             staticIntervals.add(lo, hi);
             if (intervalApplied) {
@@ -220,93 +309,39 @@ public class RuntimeIntervalModelBuilder implements Mutable {
         intervalApplied = true;
     }
 
-    public void intersectEmpty() {
-        clear();
-        intervalApplied = true;
-    }
-
-    public void intersectEquals(Function function) {
-        if (isEmptySet()) return;
-
-        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_HI_DYNAMIC, IntervalOperation.INTERSECT, staticIntervals);
-        dynamicRangeList.add(function);
-        intervalApplied = true;
-    }
-
-    public void intersectTimestamp(CharSequence seq, int lo, int lim, int position) throws SqlException {
-        if (isEmptySet()) return;
-        int size = staticIntervals.size();
-        IntervalUtils.parseSingleTimestamp(seq, lo, lim, position, staticIntervals, IntervalOperation.INTERSECT);
-        if (dynamicRangeList.size() == 0) {
-            IntervalUtils.applyLastEncodedIntervalEx(staticIntervals);
-            if (intervalApplied) {
-                IntervalUtils.intersectInplace(staticIntervals, size);
-            }
-        } else {
-            // else - nothing to do, interval already encoded in staticPeriods as 4 longs
-            dynamicRangeList.add(null);
+    private void intersectBetweenDynamic(Function funcValue1, Function funcValue2) {
+        if (isEmptySet()) {
+            return;
         }
+
+        short operation = betweenNegated ? IntervalOperation.SUBTRACT_BETWEEN : IntervalOperation.INTERSECT_BETWEEN;
+        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_SEPARATE_DYNAMIC, operation, staticIntervals);
+        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_SEPARATE_DYNAMIC, operation, staticIntervals);
+        dynamicRangeList.add(funcValue1);
+        dynamicRangeList.add(funcValue2);
         intervalApplied = true;
     }
 
-    public void intersectIntervals(CharSequence seq, int lo, int lim, int position) throws SqlException {
-        if (isEmptySet()) return;
-        int size = staticIntervals.size();
-        IntervalUtils.parseIntervalEx(seq, lo, lim, position, staticIntervals, IntervalOperation.INTERSECT);
-        if (dynamicRangeList.size() == 0) {
-            IntervalUtils.applyLastEncodedIntervalEx(staticIntervals);
-            if (intervalApplied) {
-                IntervalUtils.intersectInplace(staticIntervals, size);
+    private void intersectBetweenSemiDynamic(Function funcValue, long constValue) {
+        if (constValue == Numbers.LONG_NULL) {
+            if (!betweenNegated) {
+                intersectEmpty();
             }
-        } else {
-            // else - nothing to do, interval already encoded in staticPeriods as 4 longs
-            dynamicRangeList.add(null);
+            // else {
+            // NOT BETWEEN with NULL
+            // to be consistent with non-designated filtering
+            // do no filtering
+            // }
+            return;
         }
-        intervalApplied = true;
-    }
 
-    public boolean isEmptySet() {
-        return intervalApplied && staticIntervals.size() == 0;
-    }
-
-    public void subtractInterval(long lo, long hi) {
-        if (isEmptySet()) return;
-        if (dynamicRangeList.size() == 0) {
-            int size = staticIntervals.size();
-            staticIntervals.add(lo, hi);
-            IntervalUtils.invert(staticIntervals, size);
-            if (intervalApplied) {
-                IntervalUtils.intersectInplace(staticIntervals, size);
-            }
-        } else {
-            IntervalUtils.addHiLoInterval(lo, hi, IntervalOperation.SUBTRACT, staticIntervals);
-            dynamicRangeList.add(null);
+        if (isEmptySet()) {
+            return;
         }
-        intervalApplied = true;
-    }
 
-    public void subtractIntervals(CharSequence seq, int lo, int lim, int position) throws SqlException {
-        if (isEmptySet()) return;
-        int size = staticIntervals.size();
-        IntervalUtils.parseIntervalEx(seq, lo, lim, position, staticIntervals, IntervalOperation.SUBTRACT);
-        if (dynamicRangeList.size() == 0) {
-            IntervalUtils.applyLastEncodedIntervalEx(staticIntervals);
-            IntervalUtils.invert(staticIntervals, size);
-            if (intervalApplied) {
-                IntervalUtils.intersectInplace(staticIntervals, size);
-            }
-        } else {
-            // else - nothing to do, interval already encoded in staticPeriods as 4 longs
-            dynamicRangeList.add(null);
-        }
-        intervalApplied = true;
-    }
-
-    public void subtractEquals(Function function) {
-        if (isEmptySet()) return;
-
-        IntervalUtils.addHiLoInterval(0, 0, (short) 0, IntervalDynamicIndicator.IS_LO_HI_DYNAMIC, IntervalOperation.SUBTRACT, staticIntervals);
-        dynamicRangeList.add(function);
+        short operation = betweenNegated ? IntervalOperation.SUBTRACT_BETWEEN : IntervalOperation.INTERSECT_BETWEEN;
+        IntervalUtils.addHiLoInterval(constValue, 0, (short) 0, IntervalDynamicIndicator.IS_HI_DYNAMIC, operation, staticIntervals);
+        dynamicRangeList.add(funcValue);
         intervalApplied = true;
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,11 +24,11 @@
 
 package io.questdb.log;
 
-import io.questdb.network.Net;
 import io.questdb.network.NetworkFacade;
 import io.questdb.std.*;
 import io.questdb.std.datetime.microtime.MicrosecondClockImpl;
 import io.questdb.std.str.StringSink;
+import io.questdb.std.str.Utf8s;
 import org.jetbrains.annotations.TestOnly;
 
 import java.io.Closeable;
@@ -38,32 +38,32 @@ import java.util.concurrent.locks.LockSupport;
 
 public class LogAlertSocket implements Closeable {
 
-    public static final String localHostIp;
     public static final String DEFAULT_HOST = "127.0.0.1";
     public static final int DEFAULT_PORT = 9093;
     public static final int IN_BUFFER_SIZE = 2 * 1024 * 1024;
     public static final int OUT_BUFFER_SIZE = 4 * 1024 * 1024;
     public static final long RECONNECT_DELAY_NANO = 250_000_000; // 1/4th sec
+    public static final String localHostIp;
     private static final int HOSTS_LIMIT = 12;
-    private final Log log;
-    private final Rnd rand;
-    private final NetworkFacade nf;
-    private final StringSink responseSink = new StringSink();
     private final String[] alertHosts = new String[HOSTS_LIMIT]; // indexed by alertHostIdx < alertHostsCount
     private final int[] alertPorts = new int[HOSTS_LIMIT]; // indexed by alertHostIdx < alertHostsCount
-    private final int outBufferSize;
-    private final int inBufferSize;
-    private final long reconnectDelay;
     private final String defaultHost;
     private final int defaultPort;
+    private final int inBufferSize;
+    private final Log log;
+    private final NetworkFacade nf;
+    private final int outBufferSize;
+    private final Rnd rand;
+    private final long reconnectDelay;
     private final Runnable onReconnectRef = this::onReconnect;
-    private long outBufferPtr;
-    private long inBufferPtr;
-    private int alertHostsCount;
+    private final StringSink responseSink = new StringSink();
+    private long addressInfoAddr = -1; // tcp/ip host:port address
     private int alertHostIdx;
-    private long fdSocketAddress = -1; // tcp/ip host:port address
-    private long fdSocket = -1;
+    private int alertHostsCount;
     private String alertTargets; // host[:port](,host[:port])*
+    private long inBufferPtr;
+    private long outBufferPtr;
+    private long socketFd = -1;
 
     public LogAlertSocket(NetworkFacade nf, String alertTargets, Log log) {
         this(
@@ -96,9 +96,9 @@ public class LogAlertSocket implements Closeable {
         this.defaultPort = defaultPort;
         parseAlertTargets();
         this.inBufferSize = inBufferSize;
-        this.inBufferPtr = Unsafe.malloc(inBufferSize, MemoryTag.NATIVE_DEFAULT);
+        this.inBufferPtr = Unsafe.malloc(inBufferSize, MemoryTag.NATIVE_LOGGER);
         this.outBufferSize = outBufferSize;
-        this.outBufferPtr = Unsafe.malloc(outBufferSize, MemoryTag.NATIVE_DEFAULT);
+        this.outBufferPtr = Unsafe.malloc(outBufferSize, MemoryTag.NATIVE_LOGGER);
         this.reconnectDelay = reconnectDelay;
     }
 
@@ -106,27 +106,62 @@ public class LogAlertSocket implements Closeable {
     public void close() {
         freeSocketAndAddress();
         if (outBufferPtr != 0) {
-            Unsafe.free(outBufferPtr, outBufferSize, MemoryTag.NATIVE_DEFAULT);
+            Unsafe.free(outBufferPtr, outBufferSize, MemoryTag.NATIVE_LOGGER);
             outBufferPtr = 0;
         }
         if (inBufferPtr != 0) {
-            Unsafe.free(inBufferPtr, inBufferSize, MemoryTag.NATIVE_DEFAULT);
+            Unsafe.free(inBufferPtr, inBufferSize, MemoryTag.NATIVE_LOGGER);
             inBufferPtr = 0;
         }
     }
 
     public void connect() {
-        fdSocketAddress = nf.sockaddr(alertHosts[alertHostIdx], alertPorts[alertHostIdx]);
-        fdSocket = nf.socketTcp(true);
-        if (fdSocket > -1) {
-            if (nf.connect(fdSocket, fdSocketAddress) != 0) {
-                logNetworkConnectError("Could not connect with");
+        addressInfoAddr = nf.getAddrInfo(alertHosts[alertHostIdx], alertPorts[alertHostIdx]);
+        if (addressInfoAddr == -1) {
+            logNetworkConnectError("Could not create addr info with");
+        } else {
+            socketFd = nf.socketTcp(true);
+            nf.configureKeepAlive(socketFd);
+            if (socketFd > -1) {
+                if (nf.connectAddrInfo(socketFd, addressInfoAddr) != 0) {
+                    logNetworkConnectError("Could not connect with");
+                    freeSocketAndAddress();
+                }
+            } else {
+                logNetworkConnectError("Could not create TCP socket with");
                 freeSocketAndAddress();
             }
-        } else {
-            logNetworkConnectError("Could create TCP socket with");
-            freeSocketAndAddress();
         }
+    }
+
+    @TestOnly
+    public String[] getAlertHosts() {
+        return alertHosts;
+    }
+
+    @TestOnly
+    public int getAlertHostsCount() {
+        return alertHostsCount;
+    }
+
+    @TestOnly
+    public int[] getAlertPorts() {
+        return alertPorts;
+    }
+
+    @TestOnly
+    public String getAlertTargets() {
+        return alertTargets;
+    }
+
+    @TestOnly
+    public String getDefaultAlertHost() {
+        return defaultHost;
+    }
+
+    @TestOnly
+    public int getDefaultAlertPort() {
+        return defaultPort;
     }
 
     public long getInBufferPtr() {
@@ -145,168 +180,10 @@ public class LogAlertSocket implements Closeable {
         return outBufferSize;
     }
 
-    public boolean send(int len, Runnable onReconnect) {
-        if (len < 1) {
-            return false;
-        }
-
-        final int maxSendAttempts = 2 * alertHostsCount;
-        int sendAttempts = maxSendAttempts; // empirical, say twice per host at most
-        while (sendAttempts > 0) {
-            if (fdSocket > 0) {
-                int remaining = len;
-                long p = outBufferPtr;
-                boolean sendFail = false;
-                while (remaining > 0) {
-                    int n = nf.send(fdSocket, p, remaining);
-                    if (n > 0) {
-                        remaining -= n;
-                        p += n;
-                    } else {
-                        $currentAlertHost(log.info().$("Could not send"))
-                                .$(" [errno=")
-                                .$(nf.errno())
-                                .$(", size=")
-                                .$(n)
-                                .$(", log=")
-                                .$utf8(outBufferPtr, outBufferPtr + len)
-                                .I$();
-                        sendFail = true;
-                        // do fail over, could not send
-                        break;
-                    }
-                }
-                if (!sendFail) {
-                    // receive ack
-                    p = inBufferPtr;
-                    final int n = nf.recv(fdSocket, p, inBufferSize);
-                    if (n > 0) {
-                        logResponse(n);
-                        break;
-                    }
-                    // do fail over, ack was not received
-                }
-            }
-
-            // fail to the next host and attempt to send again
-            freeSocketAndAddress();
-            int alertHostIdx = this.alertHostIdx;
-            this.alertHostIdx = (this.alertHostIdx + 1) % alertHostsCount;
-            LogRecord logFailOver = $alertHost(
-                    this.alertHostIdx,
-                    $alertHost(
-                            alertHostIdx,
-                            log.info().$("Failing over from")
-                    ).$(" to"));
-            if (alertHostIdx == this.alertHostIdx) {
-                logFailOver.$(" with a delay of ")
-                        .$(reconnectDelay / 1000000)
-                        .$(" millis (as it is the same alert manager)")
-                        .$();
-                onReconnect.run();
-            } else {
-                logFailOver.$();
-            }
-            connect();
-            sendAttempts--;
-        }
-        boolean success = sendAttempts > 0;
-        if (!success) {
-            log.info()
-                    .$("None of the configured alert managers are accepting alerts.\n")
-                    .$("Giving up sending after ")
-                    .$(maxSendAttempts)
-                    .$(" attempts: [")
-                    .$utf8(outBufferPtr, outBufferPtr + len)
-                    .I$();
-        }
-        return success;
-    }
-
-    public boolean send(int len) {
-        return send(len, onReconnectRef);
-    }
-
-    private static boolean isContentLength(CharSequence tok, int lo, int hi) {
-        return hi - lo > 13 &&
-                (tok.charAt(lo++) | 32) == 'c' &&
-                (tok.charAt(lo++) | 32) == 'o' &&
-                (tok.charAt(lo++) | 32) == 'n' &&
-                (tok.charAt(lo++) | 32) == 't' &&
-                (tok.charAt(lo++) | 32) == 'e' &&
-                (tok.charAt(lo++) | 32) == 'n' &&
-                (tok.charAt(lo++) | 32) == 't' &&
-                (tok.charAt(lo++) | 32) == '-' &&
-                (tok.charAt(lo++) | 32) == 'l' &&
-                (tok.charAt(lo++) | 32) == 'e' &&
-                (tok.charAt(lo++) | 32) == 'n' &&
-                (tok.charAt(lo++) | 32) == 'g' &&
-                (tok.charAt(lo++) | 32) == 't' &&
-                (tok.charAt(lo) | 32) == 'h';
-    }
-
-    private LogRecord $alertHost(int idx, LogRecord logRecord) {
-        return logRecord.$(" [").$(idx).$("] ").$(alertHosts[idx]).$(':').$(alertPorts[idx]);
-    }
-
-    private LogRecord $currentAlertHost(LogRecord logRecord) {
-        return $alertHost(alertHostIdx, logRecord);
-    }
-
-    private void freeSocketAndAddress() {
-        if (fdSocketAddress != -1) {
-            Net.freeSockAddr(fdSocketAddress);
-            fdSocketAddress = -1;
-        }
-        if (fdSocket != -1) {
-            Net.close(fdSocket);
-            fdSocket = -1;
-        }
-    }
-
     @TestOnly
-    String[] getAlertHosts() {
-        return alertHosts;
-    }
-
-    @TestOnly
-    int getAlertHostsCount() {
-        return alertHostsCount;
-    }
-
-    @TestOnly
-    int[] getAlertPorts() {
-        return alertPorts;
-    }
-
-    @TestOnly
-    String getAlertTargets() {
-        return alertTargets;
-    }
-
-    @TestOnly
-    String getDefaultAlertHost() {
-        return defaultHost;
-    }
-
-    @TestOnly
-    int getDefaultAlertPort() {
-        return defaultPort;
-    }
-
-    @TestOnly
-    long getReconnectDelay() {
-        return reconnectDelay;
-    }
-
-    private void logNetworkConnectError(CharSequence message) {
-        $currentAlertHost(log.info().$(message)).$(" [errno=").$(nf.errno()).I$();
-    }
-
-    @TestOnly
-    void logResponse(int len) {
+    public void logResponse(int len) {
         responseSink.clear();
-        Chars.utf8Decode(inBufferPtr, inBufferPtr + len, responseSink);
+        Utf8s.utf8ToUtf16(inBufferPtr, inBufferPtr + len, responseSink);
         final int responseLen = responseSink.length();
         int contentLength = 0;
         int lineStart = 0;
@@ -360,6 +237,126 @@ public class LogAlertSocket implements Closeable {
                 .$();
     }
 
+    public boolean send(int len) {
+        return send(len, onReconnectRef);
+    }
+
+    public boolean send(int len, Runnable onReconnect) {
+        if (len < 1) {
+            return false;
+        }
+
+        final int maxSendAttempts = 2 * alertHostsCount;
+        int sendAttempts = maxSendAttempts; // empirical, say twice per host at most
+        while (sendAttempts > 0) {
+            if (socketFd > 0) {
+                int remaining = len;
+                long p = outBufferPtr;
+                boolean sendFail = false;
+                while (remaining > 0) {
+                    int n = nf.sendRaw(socketFd, p, remaining);
+                    if (n > 0) {
+                        remaining -= n;
+                        p += n;
+                    } else {
+                        $currentAlertHost(log.info().$("Could not send"))
+                                .$(" [errno=").$(nf.errno())
+                                .$(", size=").$(n)
+                                .$(", log=").$utf8(outBufferPtr, outBufferPtr + len).I$();
+                        sendFail = true;
+                        // do fail over, could not send
+                        break;
+                    }
+                }
+                if (!sendFail) {
+                    // receive ack
+                    p = inBufferPtr;
+                    final int n = nf.recvRaw(socketFd, p, inBufferSize);
+                    if (n > 0) {
+                        logResponse(n);
+                        break;
+                    }
+                    // do fail over, ack was not received
+                }
+            }
+
+            // fail to the next host and attempt to send again
+            freeSocketAndAddress();
+            int alertHostIdx = this.alertHostIdx;
+            this.alertHostIdx = (this.alertHostIdx + 1) % alertHostsCount;
+            LogRecord logFailOver = $alertHost(
+                    this.alertHostIdx,
+                    $alertHost(
+                            alertHostIdx,
+                            log.info().$("Failing over from")
+                    ).$(" to")
+            );
+            if (alertHostIdx == this.alertHostIdx) {
+                logFailOver.$(" with a delay of ")
+                        .$(reconnectDelay / 1000000)
+                        .$(" millis (as it is the same alert manager)")
+                        .$();
+                onReconnect.run();
+            } else {
+                logFailOver.$();
+            }
+            connect();
+            sendAttempts--;
+        }
+        boolean success = sendAttempts > 0;
+        if (!success) {
+            log.info()
+                    .$("None of the configured alert managers are accepting alerts.\n")
+                    .$("Giving up sending after ")
+                    .$(maxSendAttempts)
+                    .$(" attempts: [")
+                    .$utf8(outBufferPtr, outBufferPtr + len)
+                    .I$();
+        }
+        return success;
+    }
+
+    private static boolean isContentLength(CharSequence tok, int lo, int hi) {
+        return hi - lo > 13 &&
+                (tok.charAt(lo++) | 32) == 'c' &&
+                (tok.charAt(lo++) | 32) == 'o' &&
+                (tok.charAt(lo++) | 32) == 'n' &&
+                (tok.charAt(lo++) | 32) == 't' &&
+                (tok.charAt(lo++) | 32) == 'e' &&
+                (tok.charAt(lo++) | 32) == 'n' &&
+                (tok.charAt(lo++) | 32) == 't' &&
+                (tok.charAt(lo++) | 32) == '-' &&
+                (tok.charAt(lo++) | 32) == 'l' &&
+                (tok.charAt(lo++) | 32) == 'e' &&
+                (tok.charAt(lo++) | 32) == 'n' &&
+                (tok.charAt(lo++) | 32) == 'g' &&
+                (tok.charAt(lo++) | 32) == 't' &&
+                (tok.charAt(lo) | 32) == 'h';
+    }
+
+    private LogRecord $alertHost(int idx, LogRecord logRecord) {
+        return logRecord.$(" [").$(idx).$("] ").$(alertHosts[idx]).$(':').$(alertPorts[idx]);
+    }
+
+    private LogRecord $currentAlertHost(LogRecord logRecord) {
+        return $alertHost(alertHostIdx, logRecord);
+    }
+
+    private void freeSocketAndAddress() {
+        if (addressInfoAddr != -1) {
+            nf.freeAddrInfo(addressInfoAddr);
+            addressInfoAddr = -1;
+        }
+        if (socketFd != -1) {
+            nf.close(socketFd, log);
+            socketFd = -1;
+        }
+    }
+
+    private void logNetworkConnectError(CharSequence message) {
+        $currentAlertHost(log.info().$(message)).$(" [errno=").$(nf.errno()).I$();
+    }
+
     private void onReconnect() {
         LockSupport.parkNanos(reconnectDelay);
     }
@@ -399,7 +396,8 @@ public class LogAlertSocket implements Closeable {
                         throw new LogError(String.format(
                                 "Unexpected ':' found at position %d: %s",
                                 i,
-                                alertTargets));
+                                alertTargets
+                        ));
                     }
                     portIdx = i;
                     break;
@@ -494,6 +492,11 @@ public class LogAlertSocket implements Closeable {
         } finally {
             logRecord.$();
         }
+    }
+
+    @TestOnly
+    long getReconnectDelay() {
+        return reconnectDelay;
     }
 
     static {

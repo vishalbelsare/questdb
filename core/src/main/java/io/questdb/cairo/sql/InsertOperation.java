@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,16 +32,16 @@ import io.questdb.griffin.SqlExecutionContext;
 import java.io.Closeable;
 
 public interface InsertOperation extends Closeable {
+    void addInsertRow(InsertRowImpl row);
+
+    default void close() {
+    }
+
     InsertMethod createMethod(SqlExecutionContext executionContext) throws SqlException;
 
     InsertMethod createMethod(SqlExecutionContext executionContext, WriterSource writerSource) throws SqlException;
 
-    CharSequence getTableName();
-
-    void addInsertRow(InsertRowImpl row);
-
     OperationFuture execute(SqlExecutionContext sqlExecutionContext) throws SqlException;
 
-    default void close() {
-    }
+    void setInsertSql(CharSequence query);
 }

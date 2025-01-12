@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -38,11 +38,11 @@ import java.util.concurrent.atomic.LongAdder;
 import static io.questdb.griffin.SqlCodeGenerator.GKK_HOUR_INT;
 
 public class SumDateVectorAggregateFunction extends DateFunction implements VectorAggregateFunction {
-    private final LongAdder sum = new LongAdder();
-    private final LongAdder count = new LongAdder();
     private final int columnIndex;
+    private final LongAdder count = new LongAdder();
     private final DistinctFunc distinctFunc;
     private final KeyValueFunc keyValueFunc;
+    private final LongAdder sum = new LongAdder();
     private int valueOffset;
 
     public SumDateVectorAggregateFunction(int keyKind, int columnIndex, int workerCount) {
@@ -57,10 +57,10 @@ public class SumDateVectorAggregateFunction extends DateFunction implements Vect
     }
 
     @Override
-    public void aggregate(long address, long addressSize, int columnSizeHint, int workerId) {
+    public void aggregate(long address, long frameRowCount, int workerId) {
         if (address != 0) {
-            final long value = Vect.sumLong(address, addressSize / Long.BYTES);
-            if (value != Numbers.LONG_NaN) {
+            final long value = Vect.sumLong(address, frameRowCount);
+            if (value != Numbers.LONG_NULL) {
                 sum.add(value);
                 this.count.increment();
             }
@@ -68,17 +68,36 @@ public class SumDateVectorAggregateFunction extends DateFunction implements Vect
     }
 
     @Override
-    public void aggregate(long pRosti, long keyAddress, long valueAddress, long valueAddressSize, int columnSizeShr, int workerId) {
+    public boolean aggregate(long pRosti, long keyAddress, long valueAddress, long frameRowCount) {
         if (valueAddress == 0) {
-            distinctFunc.run(pRosti, keyAddress, valueAddressSize / Long.BYTES);
+            return distinctFunc.run(pRosti, keyAddress, frameRowCount);
         } else {
-            keyValueFunc.run(pRosti, keyAddress, valueAddress, valueAddressSize / Long.BYTES, valueOffset);
+            return keyValueFunc.run(pRosti, keyAddress, valueAddress, frameRowCount, valueOffset);
         }
+    }
+
+    @Override
+    public void clear() {
+        sum.reset();
+        count.reset();
     }
 
     @Override
     public int getColumnIndex() {
         return columnIndex;
+    }
+
+    @Override
+    public long getDate(Record rec) {
+        if (count.sum() > 0) {
+            return sum.sum();
+        }
+        return Numbers.LONG_NULL;
+    }
+
+    @Override
+    public String getName() {
+        return "sum";
     }
 
     @Override
@@ -93,8 +112,8 @@ public class SumDateVectorAggregateFunction extends DateFunction implements Vect
     }
 
     @Override
-    public void merge(long pRostiA, long pRostiB) {
-        Rosti.keyedIntSumLongMerge(pRostiA, pRostiB, valueOffset);
+    public boolean merge(long pRostiA, long pRostiB) {
+        return Rosti.keyedIntSumLongMerge(pRostiA, pRostiB, valueOffset);
     }
 
     @Override
@@ -105,26 +124,7 @@ public class SumDateVectorAggregateFunction extends DateFunction implements Vect
     }
 
     @Override
-    public void wrapUp(long pRosti) {
-        Rosti.keyedIntSumLongWrapUp(pRosti, valueOffset, sum.sum(), count.sum());
-    }
-
-    @Override
-    public void clear() {
-        sum.reset();
-        count.reset();
-    }
-
-    @Override
-    public long getDate(Record rec) {
-        if (count.sum() > 0) {
-            return sum.sum();
-        }
-        return Numbers.LONG_NaN;
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return false;
+    public boolean wrapUp(long pRosti) {
+        return Rosti.keyedIntSumLongWrapUp(pRosti, valueOffset, sum.sum(), count.sum());
     }
 }

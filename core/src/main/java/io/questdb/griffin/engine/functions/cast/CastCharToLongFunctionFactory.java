@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,8 +29,8 @@ import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.FunctionFactory;
 import io.questdb.griffin.SqlExecutionContext;
-import io.questdb.griffin.engine.functions.AbstractUnaryLongFunction;
 import io.questdb.std.IntList;
+import io.questdb.std.Numbers;
 import io.questdb.std.ObjList;
 
 public class CastCharToLongFunctionFactory implements FunctionFactory {
@@ -50,14 +50,15 @@ public class CastCharToLongFunctionFactory implements FunctionFactory {
         return new Func(args.getQuick(0));
     }
 
-    private static class Func extends AbstractUnaryLongFunction {
+    private static class Func extends AbstractCastToLongFunction {
         public Func(Function arg) {
             super(arg);
         }
 
         @Override
         public long getLong(Record rec) {
-            return arg.getChar(rec);
+            final byte v = (byte) (arg.getChar(rec) - '0');
+            return v > -1 && v < 10 ? v : Numbers.LONG_NULL;
         }
     }
 }

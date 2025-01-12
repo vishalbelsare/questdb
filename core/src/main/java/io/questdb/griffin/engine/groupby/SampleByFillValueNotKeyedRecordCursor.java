@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,18 +24,27 @@
 
 package io.questdb.griffin.engine.groupby;
 
+import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.sql.Function;
-import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.RecordCursor;
+import io.questdb.griffin.SqlException;
+import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.GroupByFunction;
+import io.questdb.griffin.engine.functions.constants.TimestampConstant;
 import io.questdb.std.ObjList;
 
 public class SampleByFillValueNotKeyedRecordCursor extends AbstractSplitVirtualRecordSampleByCursor {
-    private final SimpleMapValue simpleMapValue;
     private final SimpleMapValuePeeker peeker;
+    private final SimpleMapValue simpleMapValue;
+    private boolean endFill = false;
+    private boolean firstRun = true;
     private boolean gapFill = false;
+    private long upperBound = Long.MAX_VALUE;
 
     public SampleByFillValueNotKeyedRecordCursor(
+            CairoConfiguration configuration,
             ObjList<GroupByFunction> groupByFunctions,
+            GroupByFunctionsUpdater groupByFunctionsUpdater,
             ObjList<Function> recordFunctions,
             ObjList<Function> placeholderFunctions,
             SimpleMapValuePeeker peeker,
@@ -45,58 +54,103 @@ public class SampleByFillValueNotKeyedRecordCursor extends AbstractSplitVirtualR
             Function timezoneNameFunc,
             int timezoneNameFuncPos,
             Function offsetFunc,
-            int offsetFuncPos
+            int offsetFuncPos,
+            Function sampleFromFunc,
+            int sampleFromFuncPos,
+            Function sampleToFunc,
+            int sampleToFuncPos
     ) {
         super(
+                configuration,
                 recordFunctions,
                 timestampIndex,
                 timestampSampler,
                 groupByFunctions,
+                groupByFunctionsUpdater,
                 placeholderFunctions,
                 timezoneNameFunc,
                 timezoneNameFuncPos,
                 offsetFunc,
-                offsetFuncPos
+                offsetFuncPos,
+                sampleFromFunc,
+                sampleFromFuncPos,
+                sampleToFunc,
+                sampleToFuncPos
         );
         this.simpleMapValue = simpleMapValue;
-        this.record.of(simpleMapValue);
+        record.of(simpleMapValue);
         this.peeker = peeker;
     }
 
     @Override
-    public Record getRecord() {
-        return record;
-    }
-
-    @Override
     public boolean hasNext() {
-        if (baseRecord == null && !gapFill) {
+        initTimestamps();
+
+        if (baseRecord == null && !gapFill && !endFill) {
+            firstRun = true;
             return false;
         }
 
         // the next sample epoch could be different from current sample epoch due to DST transition,
         // e.g. clock going backward
         // we need to ensure we do not fill time transition
-        final long expectedLocalEpoch = timestampSampler.nextTimestamp(nextSampleLocalEpoch);
+        long expectedLocalEpoch;
+        if (firstRun) {
+            expectedLocalEpoch = nextSampleLocalEpoch;
+            firstRun = false;
+        } else {
+            expectedLocalEpoch = timestampSampler.nextTimestamp(nextSampleLocalEpoch);
+        }
         // is data timestamp ahead of next expected timestamp?
         if (expectedLocalEpoch < localEpoch) {
             setActiveB(expectedLocalEpoch);
-            this.sampleLocalEpoch = expectedLocalEpoch;
-            this.nextSampleLocalEpoch = expectedLocalEpoch;
+            sampleLocalEpoch = expectedLocalEpoch;
+            nextSampleLocalEpoch = expectedLocalEpoch;
             return true;
+        }
+        if (endFill) {
+            sampleLocalEpoch = expectedLocalEpoch;
+            nextSampleLocalEpoch = expectedLocalEpoch;
+            endFill = false;
+            gapFill = false;
+
+            return localEpoch < upperBound;
         }
         if (setActiveA(expectedLocalEpoch)) {
             return peeker.reset();
         }
-        return notKeyedLoop(simpleMapValue);
+
+        final boolean hasNext = notKeyedLoop(simpleMapValue);
+
+        if (baseRecord == null && sampleToFunc != TimestampConstant.NULL && !endFill) {
+            endFill = true;
+            upperBound = sampleToFunc.getTimestamp(null);
+            baseRecord = baseCursor.getRecord();
+            nextSamplePeriod(upperBound);
+        }
+
+        return hasNext;
+    }
+
+    @Override
+    public void of(RecordCursor baseCursor, SqlExecutionContext executionContext) throws SqlException {
+        super.of(baseCursor, executionContext);
+        endFill = false;
+    }
+
+    @Override
+    public void toTop() {
+        super.toTop();
+        endFill = false;
+        upperBound = Long.MAX_VALUE;
     }
 
     private boolean setActiveA(long expectedLocalEpoch) {
         if (gapFill) {
             gapFill = false;
             record.setActiveA();
-            this.sampleLocalEpoch = expectedLocalEpoch;
-            this.nextSampleLocalEpoch = expectedLocalEpoch;
+            sampleLocalEpoch = expectedLocalEpoch;
+            nextSampleLocalEpoch = expectedLocalEpoch;
             return true;
         }
         return false;
@@ -107,14 +161,6 @@ public class SampleByFillValueNotKeyedRecordCursor extends AbstractSplitVirtualR
             record.setActiveB(sampleLocalEpoch, expectedLocalEpoch, localEpoch);
             record.setTarget(peeker.peek());
             gapFill = true;
-        }
-    }
-
-    @Override
-    public void toTop() {
-        super.toTop();
-        if (base.hasNext()) {
-            baseRecord = base.getRecord();
         }
     }
 }

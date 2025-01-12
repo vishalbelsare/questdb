@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 package io.questdb.griffin.engine.functions.constants;
 
 import io.questdb.cairo.sql.Record;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.FloatFunction;
 
 public class FloatConstant extends FloatFunction implements ConstantFunction {
@@ -42,5 +43,17 @@ public class FloatConstant extends FloatFunction implements ConstantFunction {
     @Override
     public float getFloat(Record rec) {
         return value;
+    }
+
+    @Override
+    public boolean isNullConstant() {
+        // NaN is used as a marker for NULL
+        // we can't use value != value because it will always be false
+        return value != value;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.val((double) value).val('f');
     }
 }

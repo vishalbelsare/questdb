@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -45,14 +45,14 @@ public class CastByteToSymbolFunctionFactory implements FunctionFactory {
     public Function newInstance(int position, ObjList<Function> args, IntList argPositions, CairoConfiguration configuration, SqlExecutionContext sqlExecutionContext) {
         final Function arg = args.getQuick(0);
         if (arg.isConstant()) {
-            final StringSink sink = Misc.getThreadLocalBuilder();
+            final StringSink sink = Misc.getThreadLocalSink();
             sink.put(arg.getByte(null));
             return SymbolConstant.newInstance(sink);
         }
         return new Func(arg);
     }
 
-    private static class Func extends AbstractToSymbolCastFunction {
+    private static class Func extends AbstractCastToSymbolFunction {
 
         public Func(Function arg) {
             super(arg);
@@ -69,7 +69,7 @@ public class CastByteToSymbolFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        protected AbstractToSymbolCastFunction newFunc() {
+        protected AbstractCastToSymbolFunction newFunc() {
             return new Func(arg);
         }
     }

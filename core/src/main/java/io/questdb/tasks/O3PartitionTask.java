@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,53 +26,69 @@ package io.questdb.tasks;
 
 import io.questdb.cairo.O3Basket;
 import io.questdb.cairo.TableWriter;
-import io.questdb.cairo.vm.api.MemoryCARW;
+import io.questdb.cairo.vm.api.MemoryCR;
 import io.questdb.cairo.vm.api.MemoryMA;
 import io.questdb.std.ObjList;
+import io.questdb.std.ReadOnlyObjList;
 import io.questdb.std.str.Path;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class O3PartitionTask {
-    private Path pathToTable;
-    private int partitionBy;
+    private AtomicInteger columnCounter;
     private ObjList<MemoryMA> columns;
-    private ObjList<MemoryCARW> o3Columns;
-    private long srcOooLo;
-    private long srcOooHi;
-    private long srcOooMax;
-    private long oooTimestampMin;
-    private long oooTimestampMax;
-    private long partitionTimestamp;
+    private long dedupColSinkAddr;
+    private boolean isParquet;
+    private boolean last;
     private long maxTimestamp; // table's max timestamp
+    private long newPartitionSize;
+    private O3Basket o3Basket;
+    private ReadOnlyObjList<? extends MemoryCR> o3Columns;
+    private long oldPartitionSize;
+    private long oooTimestampMin;
+    private int partitionBy;
+    private long partitionTimestamp;
+    private long partitionUpdateSinkAddr;
+    private Path pathToTable;
+    private long sortedTimestampsAddr;
     private long srcDataMax;
     private long srcNameTxn;
-    private boolean last;
-    private long txn;
-    private long sortedTimestampsAddr;
+    private long srcOooHi;
+    private long srcOooLo;
+    private long srcOooMax;
     private TableWriter tableWriter;
-    private AtomicInteger columnCounter;
-    private O3Basket o3Basket;
-    private long colTopSinkAddr;
+    private long txn;
 
-    public long getColTopSinkAddr() {
-        return colTopSinkAddr;
+    public AtomicInteger getColumnCounter() {
+        return columnCounter;
     }
 
     public ObjList<MemoryMA> getColumns() {
         return columns;
     }
 
+    public long getDedupColSinkAddr() {
+        return dedupColSinkAddr;
+    }
+
     public long getMaxTimestamp() {
         return maxTimestamp;
     }
 
-    public ObjList<MemoryCARW> getO3Columns() {
+    public long getNewPartitionSize() {
+        return newPartitionSize;
+    }
+
+    public O3Basket getO3Basket() {
+        return o3Basket;
+    }
+
+    public ReadOnlyObjList<? extends MemoryCR> getO3Columns() {
         return o3Columns;
     }
 
-    public long getOooTimestampMax() {
-        return oooTimestampMax;
+    public long getOldPartitionSize() {
+        return oldPartitionSize;
     }
 
     public long getOooTimestampMin() {
@@ -85,6 +101,10 @@ public class O3PartitionTask {
 
     public long getPartitionTimestamp() {
         return partitionTimestamp;
+    }
+
+    public long getPartitionUpdateSinkAddr() {
+        return partitionUpdateSinkAddr;
     }
 
     public Path getPathToTable() {
@@ -119,10 +139,6 @@ public class O3PartitionTask {
         return tableWriter;
     }
 
-    public AtomicInteger getColumnCounter() {
-        return columnCounter;
-    }
-
     public long getTxn() {
         return txn;
     }
@@ -131,20 +147,19 @@ public class O3PartitionTask {
         return last;
     }
 
-    public O3Basket getO3Basket() {
-        return o3Basket;
+    public boolean isParquet() {
+        return isParquet;
     }
 
     public void of(
             Path path,
             int partitionBy,
             ObjList<MemoryMA> columns,
-            ObjList<MemoryCARW> o3Columns,
+            ReadOnlyObjList<? extends MemoryCR> o3Columns,
             long srcOooLo,
             long srcOooHi,
             long srcOooMax,
             long oooTimestampMin,
-            long oooTimestampMax,
             long partitionTimestamp,
             long maxTimestamp,
             long srcDataMax,
@@ -155,7 +170,11 @@ public class O3PartitionTask {
             TableWriter tableWriter,
             AtomicInteger columnCounter,
             O3Basket o3Basket,
-            long colTopSinkAddr
+            long newPartitionSize,
+            long oldPartitionSize,
+            long partitionUpdateSinkAddr,
+            long dedupColSinkAddr,
+            boolean isParquet
     ) {
         this.pathToTable = path;
         this.txn = txn;
@@ -163,7 +182,6 @@ public class O3PartitionTask {
         this.srcOooHi = srcOooHi;
         this.srcOooMax = srcOooMax;
         this.oooTimestampMin = oooTimestampMin;
-        this.oooTimestampMax = oooTimestampMax;
         this.partitionTimestamp = partitionTimestamp;
         this.maxTimestamp = maxTimestamp;
         this.srcDataMax = srcDataMax;
@@ -176,6 +194,10 @@ public class O3PartitionTask {
         this.tableWriter = tableWriter;
         this.columnCounter = columnCounter;
         this.o3Basket = o3Basket;
-        this.colTopSinkAddr = colTopSinkAddr;
+        this.newPartitionSize = newPartitionSize;
+        this.oldPartitionSize = oldPartitionSize;
+        this.partitionUpdateSinkAddr = partitionUpdateSinkAddr;
+        this.dedupColSinkAddr = dedupColSinkAddr;
+        this.isParquet = isParquet;
     }
 }

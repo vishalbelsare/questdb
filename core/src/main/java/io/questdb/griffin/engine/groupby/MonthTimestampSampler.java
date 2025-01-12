@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,19 +25,21 @@
 package io.questdb.griffin.engine.groupby;
 
 import io.questdb.std.datetime.microtime.Timestamps;
+import io.questdb.std.str.CharSink;
+import org.jetbrains.annotations.NotNull;
 
 import static io.questdb.std.datetime.microtime.Timestamps.toMicros;
 
-class MonthTimestampSampler implements TimestampSampler {
+public class MonthTimestampSampler implements TimestampSampler {
     private final int monthCount;
     private int startDay;
     private int startHour;
+    private int startMicros;
+    private int startMillis;
     private int startMin;
     private int startSec;
-    private int startMillis;
-    private int startMicros;
 
-    MonthTimestampSampler(int monthCount) {
+    public MonthTimestampSampler(int monthCount) {
         this.monthCount = monthCount;
     }
 
@@ -58,7 +60,8 @@ class MonthTimestampSampler implements TimestampSampler {
         int m = Timestamps.getMonthOfYear(value, y, leap);
         // target month
         int nextMonth = ((m - 1) / monthCount) * monthCount + 1;
-        return toMicros(y, leap, startDay, nextMonth, startHour, startMin, startSec, startMillis, startMicros);
+        int d = startDay > 0 ? startDay : 1;
+        return toMicros(y, leap, d, nextMonth, startHour, startMin, startSec, startMillis, startMicros);
     }
 
     @Override
@@ -70,7 +73,12 @@ class MonthTimestampSampler implements TimestampSampler {
         this.startMin = Timestamps.getMinuteOfHour(timestamp);
         this.startSec = Timestamps.getSecondOfMinute(timestamp);
         this.startMillis = Timestamps.getMillisOfSecond(timestamp);
-        this.startMicros = Timestamps.getMicrosOfSecond(timestamp);
+        this.startMicros = Timestamps.getMicrosOfMilli(timestamp);
+    }
+
+    @Override
+    public void toSink(@NotNull CharSink<?> sink) {
+        sink.putAscii("MonthTsSampler");
     }
 
     private long addMonth(long timestamp, int monthCount) {
@@ -95,12 +103,16 @@ class MonthTimestampSampler implements TimestampSampler {
             }
         }
         int _d = startDay;
-        int maxDay = Timestamps.getDaysPerMonth(_m, Timestamps.isLeapYear(_y));
-        if (_d > maxDay) {
-            _d = maxDay;
+        if (startDay == 0) {
+            _d = 1;
+        } else {
+            int maxDay = Timestamps.getDaysPerMonth(_m, Timestamps.isLeapYear(_y));
+            if (_d > maxDay) {
+                _d = maxDay;
+            }
         }
-        return Timestamps.toMicros(_y, _m, _d) +
-                startHour * Timestamps.HOUR_MICROS
+        return Timestamps.toMicros(_y, _m, _d)
+                + startHour * Timestamps.HOUR_MICROS
                 + startMin * Timestamps.MINUTE_MICROS
                 + startSec * Timestamps.SECOND_MICROS
                 + startMillis * Timestamps.MILLI_MICROS

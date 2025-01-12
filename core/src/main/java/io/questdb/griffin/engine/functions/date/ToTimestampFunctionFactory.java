@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,7 +31,6 @@ import io.questdb.griffin.FunctionFactory;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.TimestampFunction;
 import io.questdb.griffin.engine.functions.UnaryFunction;
-import io.questdb.griffin.model.IntervalUtils;
 import io.questdb.std.IntList;
 import io.questdb.std.Numbers;
 import io.questdb.std.NumericException;
@@ -50,7 +49,6 @@ public class ToTimestampFunctionFactory implements FunctionFactory {
     }
 
     public static final class ToTimestampFunction extends TimestampFunction implements UnaryFunction {
-
         private final Function arg;
 
         public ToTimestampFunction(Function arg) {
@@ -63,15 +61,18 @@ public class ToTimestampFunctionFactory implements FunctionFactory {
         }
 
         @Override
+        public String getName() {
+            return "to_timestamp";
+        }
+
+        @Override
         public long getTimestamp(Record rec) {
-            final CharSequence value = arg.getStr(rec);
+            final CharSequence value = arg.getStrA(rec);
             try {
-                if (value != null) {
-                    return IntervalUtils.parseFloorPartialDate(value);
-                }
+                return Numbers.parseLong(value);
             } catch (NumericException ignore) {
             }
-            return Numbers.LONG_NaN;
+            return Numbers.LONG_NULL;
         }
     }
 }

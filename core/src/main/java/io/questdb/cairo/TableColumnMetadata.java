@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,80 +25,131 @@
 package io.questdb.cairo;
 
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
+import io.questdb.griffin.Plannable;
 import org.jetbrains.annotations.Nullable;
 
-public class TableColumnMetadata {
-    private final int writerIndex;
-    private final long hash;
-    private final boolean symbolTableStatic;
+public class TableColumnMetadata implements Plannable {
     @Nullable
     private final RecordMetadata metadata;
-    private int type;
-    private String name;
+    private final int replacingIndex;
+    private final int symbolCapacity;
+    private final boolean symbolTableStatic;
+    private final int writerIndex;
+    private String columnName;
+    private int columnType;
+    private boolean dedupKeyFlag;
     private int indexValueBlockCapacity;
-    private boolean indexed;
+    private boolean symbolCacheFlag;
+    private boolean symbolIndexFlag;
 
-    public TableColumnMetadata(String name, long hash, int type) {
-        this(name, hash, type, null);
+    public TableColumnMetadata(String columnName, int columnType) {
+        this(columnName, columnType, null);
     }
 
-    public TableColumnMetadata(String name, long hash, int type, @Nullable RecordMetadata metadata) {
-        this(name, hash, type, false, 0, false, metadata, -1);
+    public TableColumnMetadata(String columnName, int columnType, @Nullable RecordMetadata metadata) {
+        this(
+                columnName,
+                columnType,
+                false,
+                0,
+                false,
+                metadata,
+                -1,
+                false,
+                0,
+                true,
+                0
+        );
         // Do not allow using this constructor for symbol types.
         // Use version where you specify symbol table parameters
-        assert !ColumnType.isSymbol(type);
+        assert !ColumnType.isSymbol(columnType);
     }
 
     public TableColumnMetadata(
-            String name,
-            long hash,
-            int type,
+            String columnName,
+            int columnType,
             boolean indexFlag,
             int indexValueBlockCapacity,
             boolean symbolTableStatic,
             @Nullable RecordMetadata metadata
     ) {
-        this(name, hash, type, indexFlag, indexValueBlockCapacity, symbolTableStatic, metadata, -1);
+        this(
+                columnName,
+                columnType,
+                indexFlag,
+                indexValueBlockCapacity,
+                symbolTableStatic,
+                metadata,
+                -1,
+                false,
+                0,
+                true,
+                0
+        );
     }
 
     public TableColumnMetadata(
-            String name,
-            long hash,
-            int type,
-            boolean indexFlag,
+            String columnName,
+            int columnType,
+            boolean symbolIndexFlag,
             int indexValueBlockCapacity,
             boolean symbolTableStatic,
             @Nullable RecordMetadata metadata,
-            int writerIndex
+            int writerIndex,
+            boolean dedupKeyFlag
     ) {
-        this.name = name;
-        this.hash = hash;
-        this.type = type;
-        this.indexed = indexFlag;
+        this(
+                columnName,
+                columnType,
+                symbolIndexFlag,
+                indexValueBlockCapacity,
+                symbolTableStatic,
+                metadata,
+                writerIndex,
+                dedupKeyFlag,
+                0,
+                true,
+                0
+        );
+    }
+
+    public TableColumnMetadata(
+            String columnName,
+            int columnType,
+            boolean symbolIndexFlag,
+            int indexValueBlockCapacity,
+            boolean symbolTableStatic,
+            @Nullable RecordMetadata metadata,
+            int writerIndex,
+            boolean dedupKeyFlag,
+            int replacingIndex,
+            boolean symbolCacheFlag,
+            int symbolCapacity
+    ) {
+        this.columnName = columnName;
+        this.columnType = columnType;
+        this.symbolIndexFlag = symbolIndexFlag;
         this.indexValueBlockCapacity = indexValueBlockCapacity;
         this.symbolTableStatic = symbolTableStatic;
         this.metadata = GenericRecordMetadata.copyOf(metadata);
         this.writerIndex = writerIndex;
+        this.dedupKeyFlag = dedupKeyFlag;
+        this.replacingIndex = replacingIndex;
+        this.symbolCacheFlag = symbolCacheFlag;
+        this.symbolCapacity = symbolCapacity;
     }
 
-    public long getHash() {
-        return hash;
+    public String getColumnName() {
+        return columnName;
+    }
+
+    public int getColumnType() {
+        return columnType;
     }
 
     public int getIndexValueBlockCapacity() {
         return indexValueBlockCapacity;
-    }
-
-    public int getWriterIndex() {
-        return writerIndex;
-    }
-
-    public void markDeleted() {
-        type = -Math.abs(type);
-    }
-
-    public void setIndexValueBlockCapacity(int indexValueBlockCapacity) {
-        this.indexValueBlockCapacity = indexValueBlockCapacity;
     }
 
     @Nullable
@@ -106,27 +157,64 @@ public class TableColumnMetadata {
         return metadata;
     }
 
-    public String getName() {
-        return name;
+    public int getReplacingIndex() {
+        return replacingIndex;
     }
 
-    public void setName(String name) {
-        this.name = name;
+    public int getSymbolCapacity() {
+        return symbolCapacity;
     }
 
-    public int getType() {
-        return type;
+    public int getWriterIndex() {
+        return writerIndex;
     }
 
-    public boolean isIndexed() {
-        return indexed;
+    public boolean isDedupKeyFlag() {
+        return dedupKeyFlag;
     }
 
-    public void setIndexed(boolean value) {
-        indexed = value;
+    public boolean isDeleted() {
+        return columnType < 0;
+    }
+
+    public boolean isSymbolCacheFlag() {
+        return symbolCacheFlag;
+    }
+
+    public boolean isSymbolIndexFlag() {
+        return symbolIndexFlag;
     }
 
     public boolean isSymbolTableStatic() {
         return symbolTableStatic;
+    }
+
+    public void markDeleted() {
+        columnType = -Math.abs(columnType);
+    }
+
+    public void rename(String name) {
+        this.columnName = name;
+    }
+
+    public void setDedupKeyFlag(boolean dedupKeyFlag) {
+        this.dedupKeyFlag = dedupKeyFlag;
+    }
+
+    public void setIndexValueBlockCapacity(int indexValueBlockCapacity) {
+        this.indexValueBlockCapacity = indexValueBlockCapacity;
+    }
+
+    public void setSymbolCacheFlag(boolean cache) {
+        this.symbolCacheFlag = cache;
+    }
+
+    public void setSymbolIndexFlag(boolean value) {
+        symbolIndexFlag = value;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.val(columnName);
     }
 }

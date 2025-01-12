@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,31 +27,43 @@ package io.questdb.mp;
 import io.questdb.std.Os;
 import io.questdb.std.Unsafe;
 
+import java.util.concurrent.locks.LockSupport;
+
 /**
  * Single owner count down latch. This latch is mutable and it does not actively
  */
 public class SOUnboundedCountDownLatch implements CountDownLatchSPI {
     private static final long COUNT_OFFSET;
-    private volatile int count = 0;
+    private volatile int awaitedCount;
+    private volatile int count;
+    private volatile Thread waiter;
 
     public SOUnboundedCountDownLatch() {
     }
 
     public void await(int count) {
+        this.awaitedCount = count;
+        this.waiter = Thread.currentThread();
         while (this.count > -count) {
-            Os.pause();
+            // Don't use LockSupport.park() here.
+            // Once in a while there can be a delay between check of this.count > -count
+            // and parking and unparkWaiter() will be called before park().
+            // Limit the parking time by using Os.park() instead of LockSupport.park()
+            Os.park();
         }
     }
 
     @Override
     public void countDown() {
-        do {
-            final int current = this.count;
-            final int next = current - 1;
-            if (Unsafe.cas(this, COUNT_OFFSET, current, next)) {
-                break;
-            }
-        } while (true);
+        final int prevCount = Unsafe.getUnsafe().getAndAddInt(this, COUNT_OFFSET, -1);
+        final int awaitedCount = this.awaitedCount;
+        if ((prevCount - 1) <= -awaitedCount) {
+            unparkWaiter();
+        }
+    }
+
+    public boolean done(int count) {
+        return this.count <= -count;
     }
 
     public int getCount() {
@@ -60,6 +72,15 @@ public class SOUnboundedCountDownLatch implements CountDownLatchSPI {
 
     public void reset() {
         count = 0;
+        awaitedCount = 0;
+        waiter = null;
+    }
+
+    private void unparkWaiter() {
+        Thread waiter = this.waiter;
+        if (waiter != null) {
+            LockSupport.unpark(waiter);
+        }
     }
 
     static {

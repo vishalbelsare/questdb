@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,15 +26,14 @@ package io.questdb.std;
 
 import java.util.Arrays;
 
-public abstract class AbstractLowerCaseCharSequenceHashSet implements Mutable {
-    protected static final CharSequence noEntryKey = null;
+abstract class AbstractLowerCaseCharSequenceHashSet implements Mutable {
     protected static final int MIN_INITIAL_CAPACITY = 16;
+    protected static final CharSequence noEntryKey = null;
     protected final double loadFactor;
-    protected int mask;
-    protected int free;
     protected int capacity;
-    // exposed for testing only
+    protected int free;
     protected CharSequence[] keys;
+    protected int mask;
 
     public AbstractLowerCaseCharSequenceHashSet(int initialCapacity, double loadFactor) {
         if (loadFactor <= 0d || loadFactor >= 1d) {
@@ -50,7 +49,7 @@ public abstract class AbstractLowerCaseCharSequenceHashSet implements Mutable {
     @Override
     public void clear() {
         Arrays.fill(keys, noEntryKey);
-        free = this.capacity;
+        free = capacity;
     }
 
     public boolean excludes(CharSequence key) {
@@ -59,6 +58,14 @@ public abstract class AbstractLowerCaseCharSequenceHashSet implements Mutable {
 
     public boolean excludes(CharSequence key, int lo, int hi) {
         return keyIndex(key, lo, hi) > -1;
+    }
+
+    public CharSequence getKey(int index) {
+        return keys[index];
+    }
+
+    public int getKeyCount() {
+        return keys.length;
     }
 
     public int keyIndex(CharSequence key) {
@@ -138,15 +145,6 @@ public abstract class AbstractLowerCaseCharSequenceHashSet implements Mutable {
         return capacity - free;
     }
 
-    /**
-     * Erases entry in array.
-     *
-     * @param index always positive, no arithmetic required.
-     */
-    abstract protected void erase(int index);
-
-    abstract protected void move(int from, int to);
-
     private int probe(CharSequence key, int index) {
         do {
             index = (index + 1) & mask;
@@ -171,4 +169,13 @@ public abstract class AbstractLowerCaseCharSequenceHashSet implements Mutable {
             }
         } while (true);
     }
+
+    /**
+     * Erases entry in array.
+     *
+     * @param index always positive, no arithmetic required.
+     */
+    abstract protected void erase(int index);
+
+    abstract protected void move(int from, int to);
 }

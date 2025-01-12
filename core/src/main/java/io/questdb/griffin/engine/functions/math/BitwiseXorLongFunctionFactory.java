@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.BinaryFunction;
 import io.questdb.griffin.engine.functions.LongFunction;
@@ -67,15 +68,20 @@ public class BitwiseXorLongFunctionFactory implements FunctionFactory {
         }
 
         @Override
+        public long getLong(Record rec) {
+            final long l = left.getLong(rec);
+            final long r = right.getLong(rec);
+            return l != Numbers.LONG_NULL && r != Numbers.LONG_NULL ? l ^ r : Numbers.LONG_NULL;
+        }
+
+        @Override
         public Function getRight() {
             return right;
         }
 
         @Override
-        public long getLong(Record rec) {
-            final long l = left.getLong(rec);
-            final long r = right.getLong(rec);
-            return l != Numbers.LONG_NaN && r != Numbers.LONG_NaN ? l ^ r : Numbers.LONG_NaN;
+        public void toPlan(PlanSink sink) {
+            sink.val(left).val('^').val(right);
         }
     }
 }

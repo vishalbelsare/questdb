@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,24 +24,28 @@
 
 package io.questdb.griffin.engine.groupby;
 
+import io.questdb.cairo.CairoException;
 import io.questdb.cairo.map.MapValue;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.std.Unsafe;
 
 public class InterpolationUtil {
-    static final StoreYFunction STORE_Y_DOUBLE = InterpolationUtil::storeYDouble;
-    static final StoreYFunction STORE_Y_FLOAT = InterpolationUtil::storeYFloat;
-    static final StoreYFunction STORE_Y_BYTE = InterpolationUtil::storeYByte;
-    static final StoreYFunction STORE_Y_SHORT = InterpolationUtil::storeYShort;
-    static final StoreYFunction STORE_Y_INT = InterpolationUtil::storeYInt;
-    static final StoreYFunction STORE_Y_LONG = InterpolationUtil::storeYLong;
-
+    static final InterpolatorFunction INTERPOLATE_BYTE = InterpolationUtil::interpolateByte;
     static final InterpolatorFunction INTERPOLATE_DOUBLE = InterpolationUtil::interpolateDouble;
     static final InterpolatorFunction INTERPOLATE_FLOAT = InterpolationUtil::interpolateFloat;
-    static final InterpolatorFunction INTERPOLATE_BYTE = InterpolationUtil::interpolateByte;
-    static final InterpolatorFunction INTERPOLATE_SHORT = InterpolationUtil::interpolateShort;
     static final InterpolatorFunction INTERPOLATE_INT = InterpolationUtil::interpolateInt;
     static final InterpolatorFunction INTERPOLATE_LONG = InterpolationUtil::interpolateLong;
+    static final InterpolatorFunction INTERPOLATE_SHORT = InterpolationUtil::interpolateShort;
+    static final StoreYFunction STORE_Y_BYTE = InterpolationUtil::storeYByte;
+    static final StoreYFunction STORE_Y_DOUBLE = InterpolationUtil::storeYDouble;
+    static final StoreYFunction STORE_Y_FLOAT = InterpolationUtil::storeYFloat;
+    static final StoreYFunction STORE_Y_INT = InterpolationUtil::storeYInt;
+    static final StoreYFunction STORE_Y_LONG = InterpolationUtil::storeYLong;
+    static final StoreYFunction STORE_Y_SHORT = InterpolationUtil::storeYShort;
+
+    public static double interpolate(long x, long x1, double y1, long x2, double y2) {
+        return (y1 * (x2 - x) + y2 * (x - x1)) / (x2 - x1);
+    }
 
     public static void interpolateByte(
             GroupByFunction function,
@@ -148,8 +152,23 @@ public class InterpolationUtil {
         );
     }
 
-    public static double interpolate(long x, long x1, double y1, long x2, double y2) {
-        return (y1 * (x2 - x) + y2 * (x - x1)) / (x2 - x1);
+    static void interpolateBoundary(
+            GroupByFunction function,
+            long boundaryTimestamp,
+            MapValue mapValue1,
+            MapValue mapValue2,
+            boolean isEndOfBoundary
+    ) {
+        try {
+            function.interpolateBoundary(
+                    mapValue1,
+                    mapValue2,
+                    boundaryTimestamp,
+                    isEndOfBoundary
+            );
+        } catch (UnsupportedOperationException e) {
+            throw CairoException.nonCritical().put("interpolation is not supported for function: ").put(function.getClass().getName());
+        }
     }
 
     static void interpolateDouble(
@@ -180,24 +199,20 @@ public class InterpolationUtil {
             MapValue mapValue1,
             MapValue mapValue2
     ) {
-        function.interpolateGap(
-                mapValue,
-                mapValue1, mapValue2,
-                x);
+        try {
+            function.interpolateGap(
+                    mapValue,
+                    mapValue1,
+                    mapValue2,
+                    x
+            );
+        } catch (UnsupportedOperationException e) {
+            throw CairoException.nonCritical().put("interpolation is not supported for function: ").put(function.getClass().getName());
+        }
     }
 
-    static void interpolateBoundary(
-            GroupByFunction function,
-            long boundaryTimestamp,
-            MapValue mapValue1,
-            MapValue mapValue2,
-            boolean isEndOfBoundary
-    ) {
-        function.interpolateBoundary(
-                mapValue1,
-                mapValue2,
-                boundaryTimestamp,
-                isEndOfBoundary);
+    static void storeYByte(GroupByFunction function, MapValue mapValue, long targetAddress) {
+        Unsafe.getUnsafe().putByte(targetAddress, function.getByte(mapValue));
     }
 
     static void storeYDouble(GroupByFunction function, MapValue mapValue, long targetAddress) {
@@ -208,14 +223,6 @@ public class InterpolationUtil {
         Unsafe.getUnsafe().putFloat(targetAddress, function.getFloat(mapValue));
     }
 
-    static void storeYByte(GroupByFunction function, MapValue mapValue, long targetAddress) {
-        Unsafe.getUnsafe().putByte(targetAddress, function.getByte(mapValue));
-    }
-
-    static void storeYShort(GroupByFunction function, MapValue mapValue, long targetAddress) {
-        Unsafe.getUnsafe().putShort(targetAddress, function.getShort(mapValue));
-    }
-
     static void storeYInt(GroupByFunction function, MapValue mapValue, long targetAddress) {
         Unsafe.getUnsafe().putInt(targetAddress, function.getInt(mapValue));
     }
@@ -224,12 +231,16 @@ public class InterpolationUtil {
         Unsafe.getUnsafe().putLong(targetAddress, function.getLong(mapValue));
     }
 
-    @FunctionalInterface
-    interface StoreYFunction {
-        void store(GroupByFunction function, MapValue mapValue, long targetAddress);
+    static void storeYShort(GroupByFunction function, MapValue mapValue, long targetAddress) {
+        Unsafe.getUnsafe().putShort(targetAddress, function.getShort(mapValue));
     }
 
     interface InterpolatorFunction {
         void interpolateAndStore(GroupByFunction function, MapValue mapValue, long x, long x1, long x2, long y1Address, long y2Address);
+    }
+
+    @FunctionalInterface
+    interface StoreYFunction {
+        void store(GroupByFunction function, MapValue mapValue, long targetAddress);
     }
 }

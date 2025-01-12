@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,10 +25,16 @@
 package io.questdb.metrics;
 
 import io.questdb.std.ObjList;
-import io.questdb.std.str.CharSink;
+import io.questdb.std.str.BorrowableUtf8Sink;
+import org.jetbrains.annotations.NotNull;
 
 public class MetricsRegistryImpl implements MetricsRegistry {
-    private final ObjList<Scrapable> metrics = new ObjList<>();
+    private final ObjList<Target> metrics = new ObjList<>();
+
+    @Override
+    public void addTarget(Target target) {
+        metrics.add(target);
+    }
 
     @Override
     public Counter newCounter(CharSequence name) {
@@ -54,30 +60,37 @@ public class MetricsRegistryImpl implements MetricsRegistry {
     }
 
     @Override
-    public Gauge newGauge(CharSequence name) {
-        Gauge gauge = new GaugeImpl(name);
+    public DoubleGauge newDoubleGauge(CharSequence name) {
+        DoubleGaugeImpl gauge = new DoubleGaugeImpl(name);
         metrics.add(gauge);
         return gauge;
     }
 
     @Override
-    public Gauge newGauge(int memoryTag) {
-        Gauge gauge = new MemoryTagGauge(memoryTag);
+    public LongGauge newLongGauge(CharSequence name) {
+        LongGauge gauge = new LongGaugeImpl(name);
         metrics.add(gauge);
         return gauge;
     }
 
     @Override
-    public Gauge newVirtualGauge(CharSequence _name, VirtualGauge.StatProvider provider) {
-        VirtualGauge gauge = new VirtualGauge(_name, provider);
+    public LongGauge newLongGauge(int memoryTag) {
+        LongGauge gauge = new MemoryTagLongGauge(memoryTag);
         metrics.add(gauge);
         return gauge;
     }
 
     @Override
-    public void scrapeIntoPrometheus(CharSink sink) {
+    public LongGauge newVirtualGauge(CharSequence _name, VirtualLongGauge.StatProvider provider) {
+        VirtualLongGauge gauge = new VirtualLongGauge(_name, provider);
+        metrics.add(gauge);
+        return gauge;
+    }
+
+    @Override
+    public void scrapeIntoPrometheus(@NotNull BorrowableUtf8Sink sink) {
         for (int i = 0, n = metrics.size(); i < n; i++) {
-            Scrapable metric = metrics.getQuick(i);
+            Target metric = metrics.getQuick(i);
             metric.scrapeIntoPrometheus(sink);
         }
     }

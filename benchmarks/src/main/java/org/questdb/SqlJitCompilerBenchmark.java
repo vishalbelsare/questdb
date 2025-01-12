@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,11 +28,10 @@ import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.CairoEngine;
 import io.questdb.cairo.DefaultCairoConfiguration;
 import io.questdb.cairo.SqlJitMode;
-import io.questdb.cairo.security.AllowAllCairoSecurityContext;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.griffin.SqlCompiler;
+import io.questdb.griffin.SqlCompilerImpl;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.SqlExecutionContextImpl;
@@ -54,28 +53,26 @@ public class SqlJitCompilerBenchmark {
     private static final int NUM_ROWS = (PARTITION_SIZE_MB * 1024 * 1024) / Long.BYTES;
 
     private static final CairoConfiguration configuration = new DefaultCairoConfiguration(System.getProperty("java.io.tmpdir"));
-
-    @Param({"SIMD", "SCALAR", "DISABLED"})
-    public JitMode jitMode;
     @Param({"i64", "i32"})
     public String column;
-
-    private CairoEngine engine;
+    @Param({"SIMD", "SCALAR", "DISABLED"})
+    public JitMode jitMode;
+    private SqlCompilerImpl compiler;
     private SqlExecutionContextImpl ctx;
-    private SqlCompiler compiler;
+    private CairoEngine engine;
     private RecordCursorFactory factory;
 
     public static void main(String[] args) throws RunnerException {
         try (CairoEngine engine = new CairoEngine(configuration)) {
             SqlExecutionContext sqlExecutionContext = new SqlExecutionContextImpl(engine, 1)
                     .with(
-                            AllowAllCairoSecurityContext.INSTANCE,
+                            configuration.getFactoryProvider().getSecurityContextFactory().getRootContext(),
                             null,
                             null,
                             -1,
                             null
                     );
-            try (SqlCompiler compiler = new SqlCompiler(engine)) {
+            try (SqlCompilerImpl compiler = new SqlCompilerImpl(engine)) {
                 compiler.compile("create table if not exists x as (select" +
                         " rnd_long() i64," +
                         " rnd_int() i32," +
@@ -95,14 +92,14 @@ public class SqlJitCompilerBenchmark {
 
         new Runner(opt).run();
 
-        LogFactory.INSTANCE.haltThread();
+        LogFactory.haltInstance();
     }
 
     @Setup(Level.Iteration)
     public void setup() throws Exception {
         engine = new CairoEngine(configuration);
         ctx = new SqlExecutionContextImpl(engine, 1);
-        compiler = new SqlCompiler(engine);
+        compiler = new SqlCompilerImpl(engine);
 
         boolean jitShouldBeEnabled = false;
         switch (jitMode) {
@@ -118,7 +115,7 @@ public class SqlJitCompilerBenchmark {
                 ctx.setJitMode(SqlJitMode.JIT_MODE_DISABLED);
                 break;
         }
-        compiler = new SqlCompiler(engine);
+        compiler = new SqlCompilerImpl(engine);
         factory = compiler.compile("select * from x where " + column + " = 0", ctx).getRecordCursorFactory();
         if (factory.usesCompiledFilter() != jitShouldBeEnabled) {
             throw new IllegalStateException("Unexpected JIT usage reported by factory: " +

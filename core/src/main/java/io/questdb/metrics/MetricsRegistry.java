@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,7 +24,9 @@
 
 package io.questdb.metrics;
 
-public interface MetricsRegistry extends Scrapable {
+public interface MetricsRegistry extends Target {
+
+    void addTarget(Target target);
 
     Counter newCounter(CharSequence name);
 
@@ -34,9 +36,11 @@ public interface MetricsRegistry extends Scrapable {
                                     CharSequence labelName0, CharSequence[] labelValues0,
                                     CharSequence labelName1, CharSequence[] labelValues1);
 
-    Gauge newGauge(CharSequence name);
+    DoubleGauge newDoubleGauge(CharSequence name);
 
-    Gauge newGauge(int memoryTag);
+    LongGauge newLongGauge(CharSequence name);
 
-    Gauge newVirtualGauge(CharSequence name, VirtualGauge.StatProvider provider);
+    LongGauge newLongGauge(int memoryTag);
+
+    LongGauge newVirtualGauge(CharSequence name, VirtualLongGauge.StatProvider provider);
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,15 +24,13 @@
 
 package io.questdb.griffin.engine.groupby;
 
-import io.questdb.cairo.CairoConfiguration;
-import io.questdb.cairo.EntityColumnFilter;
-import io.questdb.cairo.RecordSink;
-import io.questdb.cairo.RecordSinkFactory;
-import io.questdb.cairo.map.FastMap;
+import io.questdb.cairo.*;
 import io.questdb.cairo.map.Map;
 import io.questdb.cairo.map.MapKey;
-import io.questdb.cairo.sql.*;
+import io.questdb.cairo.map.OrderedMap;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.BytecodeAssembler;
@@ -40,16 +38,9 @@ import io.questdb.std.Misc;
 import io.questdb.std.Transient;
 import org.jetbrains.annotations.NotNull;
 
-public class DistinctTimeSeriesRecordCursorFactory implements RecordCursorFactory {
-
+public class DistinctTimeSeriesRecordCursorFactory extends AbstractRecordCursorFactory {
     protected final RecordCursorFactory base;
-    private final Map dataMap;
     private final DistinctTimeSeriesRecordCursor cursor;
-    // this sink is used to copy recordKeyMap keys to dataMap
-    private final RecordMetadata metadata;
-    public static final byte COMPUTE_NEXT = 0;
-    public static final byte REUSE_CURRENT = 1;
-    public static final byte NO_ROWS = 2;
 
     public DistinctTimeSeriesRecordCursorFactory(
             CairoConfiguration configuration,
@@ -57,42 +48,51 @@ public class DistinctTimeSeriesRecordCursorFactory implements RecordCursorFactor
             @Transient @NotNull EntityColumnFilter columnFilter,
             @Transient @NotNull BytecodeAssembler asm
     ) {
-        assert base.recordCursorSupportsRandomAccess();
-        final RecordMetadata metadata = base.getMetadata();
-        // sink will be storing record columns to map key
-        columnFilter.of(metadata.getColumnCount());
-        RecordSink recordSink = RecordSinkFactory.getInstance(asm, metadata, columnFilter, false);
-        this.dataMap = new FastMap(
-                configuration.getSqlMapPageSize(),
-                metadata,
-                configuration.getSqlDistinctTimestampKeyCapacity(),
-                configuration.getSqlDistinctTimestampLoadFactor(),
-                Integer.MAX_VALUE
-        ) ;
-
+        super(base.getMetadata());
         this.base = base;
-        this.metadata = metadata;
-        this.cursor = new DistinctTimeSeriesRecordCursor(
-                getMetadata().getTimestampIndex(),
-                dataMap,
-                recordSink
-        );
+        try {
+            assert base.recordCursorSupportsRandomAccess();
+            final RecordMetadata metadata = base.getMetadata();
+            // sink will be storing record columns to map key
+            columnFilter.of(metadata.getColumnCount());
+            RecordSink recordSink = RecordSinkFactory.getInstance(asm, metadata, columnFilter);
+            Map dataMap = new OrderedMap(
+                    configuration.getSqlSmallMapPageSize(),
+                    metadata,
+                    configuration.getSqlDistinctTimestampKeyCapacity(),
+                    configuration.getSqlDistinctTimestampLoadFactor(),
+                    Integer.MAX_VALUE
+            );
+            this.cursor = new DistinctTimeSeriesRecordCursor(
+                    getMetadata().getTimestampIndex(),
+                    dataMap,
+                    recordSink
+            );
+        } catch (Throwable t) {
+            close();
+            throw t;
+        }
     }
 
     @Override
-    public void close() {
-        dataMap.close();
-        base.close();
+    public RecordCursorFactory getBaseFactory() {
+        return base;
     }
 
     @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        return cursor.of(base.getCursor(executionContext), executionContext);
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            return cursor.of(baseCursor, executionContext);
+        } catch (Throwable th) {
+            cursor.close();
+            throw th;
+        }
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return metadata;
+    public int getScanDirection() {
+        return base.getScanDirection();
     }
 
     @Override
@@ -101,32 +101,50 @@ public class DistinctTimeSeriesRecordCursorFactory implements RecordCursorFactor
     }
 
     @Override
-    public boolean hasDescendingOrder() {
-        return base.hasDescendingOrder();
+    public void toPlan(PlanSink sink) {
+        sink.type("DistinctTimeSeries");
+        sink.attr("keys").val(getMetadata());
+        sink.child(base);
+    }
+
+    @Override
+    protected void _close() {
+        Misc.free(base);
+        Misc.free(cursor);
     }
 
     private static class DistinctTimeSeriesRecordCursor implements RecordCursor {
+        private static final byte COMPUTE_NEXT = 1;
+        private static final byte INIT_FIRST_TIMESTAMP = 0;
+        private static final byte NO_ROWS = 3;
+        private static final byte REUSE_CURRENT = 2;
+
         private final Map dataMap;
         private final RecordSink recordSink;
         private final int timestampIndex;
         private RecordCursor baseCursor;
+        private SqlExecutionCircuitBreaker circuitBreaker;
+        private boolean isOpen;
+        private long prevRowId;
+        private long prevTimestamp;
         private Record record;
         private Record recordB;
-        private long prevTimestamp;
-        private long prevRowId;
         private byte state = 0;
-        private SqlExecutionCircuitBreaker circuitBreaker;
 
         public DistinctTimeSeriesRecordCursor(int timestampIndex, Map dataMap, RecordSink recordSink) {
             this.timestampIndex = timestampIndex;
             this.dataMap = dataMap;
             this.recordSink = recordSink;
+            this.isOpen = true;
         }
 
         @Override
         public void close() {
-            Misc.free(baseCursor);
-            dataMap.restoreInitialCapacity();
+            if (isOpen) {
+                isOpen = false;
+                baseCursor = Misc.free(baseCursor);
+                Misc.free(dataMap);
+            }
         }
 
         @Override
@@ -135,17 +153,29 @@ public class DistinctTimeSeriesRecordCursorFactory implements RecordCursorFactor
         }
 
         @Override
+        public Record getRecordB() {
+            return baseCursor.getRecordB();
+        }
+
+        @Override
         public SymbolTable getSymbolTable(int columnIndex) {
             return baseCursor.getSymbolTable(columnIndex);
         }
 
         @Override
-        public SymbolTable newSymbolTable(int columnIndex) {
-            return baseCursor.newSymbolTable(columnIndex);
-        }
-
-        @Override
         public boolean hasNext() {
+            if (state == INIT_FIRST_TIMESTAMP) {
+                // first iteration to get initial timestamp value
+                if (baseCursor.hasNext()) {
+                    prevTimestamp = record.getTimestamp(timestampIndex);
+                    prevRowId = record.getRowId();
+                    state = REUSE_CURRENT;
+                } else {
+                    // edge case - base cursor is empty, avoid calling hasNext() again
+                    state = NO_ROWS;
+                }
+            }
+
             if (state == COMPUTE_NEXT) {
                 while (baseCursor.hasNext()) {
                     circuitBreaker.statefulThrowExceptionIfTripped();
@@ -162,14 +192,28 @@ public class DistinctTimeSeriesRecordCursorFactory implements RecordCursorFactor
                 }
                 return false;
             }
-            boolean next = state == REUSE_CURRENT;
+
+            boolean next = (state == REUSE_CURRENT);
             state = COMPUTE_NEXT;
             return next;
         }
 
         @Override
-        public Record getRecordB() {
-            return baseCursor.getRecordB();
+        public SymbolTable newSymbolTable(int columnIndex) {
+            return baseCursor.newSymbolTable(columnIndex);
+        }
+
+        public RecordCursor of(RecordCursor baseCursor, SqlExecutionContext sqlExecutionContext) {
+            this.baseCursor = baseCursor;
+            record = baseCursor.getRecord();
+            recordB = baseCursor.getRecordB();
+            if (!isOpen) {
+                isOpen = true;
+                dataMap.reopen();
+            }
+            circuitBreaker = sqlExecutionContext.getCircuitBreaker();
+            state = INIT_FIRST_TIMESTAMP;
+            return this;
         }
 
         @Override
@@ -178,33 +222,14 @@ public class DistinctTimeSeriesRecordCursorFactory implements RecordCursorFactor
         }
 
         @Override
-        public void toTop() {
-            baseCursor.toTop();
-            dataMap.clear();
-        }
-
-        @Override
         public long size() {
             return -1;
         }
 
-        public RecordCursor of(RecordCursor baseCursor, SqlExecutionContext sqlExecutionContext) {
-            this.baseCursor = baseCursor;
-            this.circuitBreaker = sqlExecutionContext.getCircuitBreaker();
-            this.record = baseCursor.getRecord();
-            this.recordB = baseCursor.getRecordB();
-            this.dataMap.clear();
-
-            // first iteration to get initial timestamp value
-            if (baseCursor.hasNext()) {
-                prevTimestamp = record.getTimestamp(timestampIndex);
-                prevRowId = record.getRowId();
-                state = REUSE_CURRENT;
-            } else {
-                // edge case - base cursor is empty, avoid calling hasNext() again
-                state = NO_ROWS;
-            }
-            return this;
+        @Override
+        public void toTop() {
+            baseCursor.toTop();
+            dataMap.clear();
         }
 
         private boolean checkIfNotDupe() {

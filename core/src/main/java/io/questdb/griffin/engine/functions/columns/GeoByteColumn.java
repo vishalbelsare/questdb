@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ package io.questdb.griffin.engine.functions.columns;
 
 import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.sql.Record;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.GeoByteFunction;
 import org.jetbrains.annotations.TestOnly;
 
@@ -54,19 +55,24 @@ public class GeoByteColumn extends GeoByteFunction {
         return new GeoByteColumn(columnIndex, columnType);
     }
 
+    @TestOnly
+    public int getColumnIndex() {
+        return columnIndex;
+    }
+
     @Override
     public byte getGeoByte(Record rec) {
         return rec.getGeoByte(columnIndex);
     }
 
     @Override
-    public boolean isReadThreadSafe() {
+    public boolean isThreadSafe() {
         return true;
     }
 
-    @TestOnly
-    int getColumnIndex() {
-        return columnIndex;
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.putColumnName(columnIndex);
     }
 
     static {
@@ -79,4 +85,5 @@ public class GeoByteColumn extends GeoByteFunction {
             }
         }
     }
+
 }

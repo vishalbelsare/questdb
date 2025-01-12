@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -44,38 +44,37 @@ import java.io.Closeable;
 
 public class TextMetadataParser implements JsonParser, Mutable, Closeable {
     private static final Log LOG = LogFactory.getLog(TextMetadataParser.class);
-
+    private static final int P_INDEX = 6;
+    private static final int P_LOCALE = 4;
+    private static final int P_NAME = 1;
+    private static final int P_PATTERN = 3;
+    private static final int P_TYPE = 2;
+    private static final int P_UTF8 = 5;
     private static final int S_NEED_ARRAY = 1;
     private static final int S_NEED_OBJECT = 2;
     private static final int S_NEED_PROPERTY = 3;
-    private static final int P_NAME = 1;
-    private static final int P_TYPE = 2;
-    private static final int P_PATTERN = 3;
-    private static final int P_LOCALE = 4;
-    private static final int P_UTF8 = 5;
-    private static final int P_INDEX = 6;
     private static final CharSequenceIntHashMap propertyNameMap = new CharSequenceIntHashMap();
-    private final DateLocaleFactory dateLocaleFactory;
-    private final ObjectPool<FloatingCharSequence> csPool;
-    private final DateFormatFactory dateFormatFactory;
-    private final TimestampFormatFactory timestampFormatFactory;
     private final ObjList<CharSequence> columnNames;
     private final ObjList<TypeAdapter> columnTypes;
-    private final TypeManager typeManager;
+    private final ObjectPool<FloatingCharSequence> csPool;
+    private final DateFormatFactory dateFormatFactory;
     private final DateLocale dateLocale;
-    private int state = S_NEED_ARRAY;
-    private CharSequence name;
-    private int type = -1;
-    private CharSequence pattern;
-    private CharSequence locale;
-    private int propertyIndex;
+    private final DateLocaleFactory dateLocaleFactory;
+    private final TimestampFormatFactory timestampFormatFactory;
+    private final TypeManager typeManager;
     private long buf;
     private long bufCapacity = 0;
     private int bufSize = 0;
-    private CharSequence tableName;
-    private int localePosition;
-    private boolean utf8 = false;
     private boolean index = false;
+    private CharSequence locale;
+    private int localePosition;
+    private CharSequence name;
+    private CharSequence pattern;
+    private int propertyIndex;
+    private int state = S_NEED_ARRAY;
+    private CharSequence tableName;
+    private int type = -1;
+    private boolean utf8 = false;
 
     public TextMetadataParser(TextConfiguration textConfiguration, TypeManager typeManager) {
         this.columnNames = new ObjList<>();
@@ -102,7 +101,7 @@ public class TextMetadataParser implements JsonParser, Mutable, Closeable {
     public void close() {
         clear();
         if (bufCapacity > 0) {
-            Unsafe.free(buf, bufCapacity, MemoryTag.NATIVE_DEFAULT);
+            Unsafe.free(buf, bufCapacity, MemoryTag.NATIVE_TEXT_PARSER_RSS);
             bufCapacity = 0;
         }
     }
@@ -176,12 +175,6 @@ public class TextMetadataParser implements JsonParser, Mutable, Closeable {
         }
     }
 
-    private static void strcpyw(final CharSequence value, final int len, final long address) {
-        for (int i = 0; i < len; i++) {
-            Unsafe.getUnsafe().putChar(address + ((long) i << 1), value.charAt(i));
-        }
-    }
-
     private static void checkInputs(int position, CharSequence name, int type) throws JsonException {
         if (name == null) {
             throw JsonException.$(position, "Missing 'name' property");
@@ -189,6 +182,12 @@ public class TextMetadataParser implements JsonParser, Mutable, Closeable {
 
         if (type == -1) {
             throw JsonException.$(position, "Missing 'type' property");
+        }
+    }
+
+    private static void strcpyw(final CharSequence value, final int len, final long address) {
+        for (int i = 0; i < len; i++) {
+            Unsafe.getUnsafe().putChar(address + ((long) i << 1), value.charAt(i));
         }
     }
 
@@ -206,10 +205,10 @@ public class TextMetadataParser implements JsonParser, Mutable, Closeable {
         final int l = tag.length() * 2;
         final long n = bufSize + l;
         if (n > bufCapacity) {
-            long ptr = Unsafe.malloc(n * 2, MemoryTag.NATIVE_DEFAULT);
+            long ptr = Unsafe.malloc(n * 2, MemoryTag.NATIVE_TEXT_PARSER_RSS);
             Vect.memcpy(ptr, buf, bufSize);
             if (bufCapacity > 0) {
-                Unsafe.free(buf, bufCapacity, MemoryTag.NATIVE_DEFAULT);
+                Unsafe.free(buf, bufCapacity, MemoryTag.NATIVE_TEXT_PARSER_RSS);
             }
             buf = ptr;
             bufCapacity = n * 2;
@@ -272,8 +271,13 @@ public class TextMetadataParser implements JsonParser, Mutable, Closeable {
 
     private class FloatingCharSequence extends AbstractCharSequence implements Mutable {
 
-        private int offset;
         private int len;
+        private int offset;
+
+        @Override
+        public char charAt(int index) {
+            return Unsafe.getUnsafe().getChar(buf + offset + index * 2L);
+        }
 
         @Override
         public void clear() {
@@ -282,11 +286,6 @@ public class TextMetadataParser implements JsonParser, Mutable, Closeable {
         @Override
         public int length() {
             return len;
-        }
-
-        @Override
-        public char charAt(int index) {
-            return Unsafe.getUnsafe().getChar(buf + offset + index * 2L);
         }
 
         CharSequence of(int lo, int len) {
