@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -36,25 +36,21 @@ public class CompiledFilter implements Closeable {
 
     private long fnAddress;
 
-    public void compile(MemoryCARW filter, int options) throws SqlException {
-        final long filterSize = filter.getAppendOffset();
-        final long filterAddress = filter.getPageAddress(0);
-
-        FiltersCompiler.JitError error = tlJitError.get();
-        error.reset();
-        fnAddress = FiltersCompiler.compileFunction(filterAddress, filterSize, options, error);
-        if (error.errorCode() != 0) {
-            throw SqlException.position(0)
-                    .put("JIT compilation failed [errorCode").put(error.errorCode())
-                    .put(", msg=").put(error.message()).put("]");
-        }
-    }
-
-    public long call(long colsAddress, long colsSize, long varsAddress, long varsSize, long rowsAddress, long rowsSize, long rowsStartOffset) {
+    public long call(
+            long dataAddress,
+            long dataSize,
+            long varSizeAuxAddress,
+            long varsAddress,
+            long varsSize,
+            long rowsAddress,
+            long rowsSize,
+            long rowsStartOffset
+    ) {
         return FiltersCompiler.callFunction(
                 fnAddress,
-                colsAddress,
-                colsSize,
+                dataAddress,
+                dataSize,
+                varSizeAuxAddress,
                 varsAddress,
                 varsSize,
                 rowsAddress,
@@ -68,6 +64,20 @@ public class CompiledFilter implements Closeable {
         if (fnAddress > 0) {
             FiltersCompiler.freeFunction(fnAddress);
             fnAddress = 0;
+        }
+    }
+
+    public void compile(MemoryCARW filter, int options) throws SqlException {
+        final long filterSize = filter.getAppendOffset();
+        final long filterAddress = filter.getPageAddress(0);
+
+        FiltersCompiler.JitError error = tlJitError.get();
+        error.reset();
+        fnAddress = FiltersCompiler.compileFunction(filterAddress, filterSize, options, error);
+        if (error.errorCode() != 0) {
+            throw SqlException.position(0)
+                    .put("JIT compilation failed [errorCode").put(error.errorCode())
+                    .put(", msg=").put(error.message()).put("]");
         }
     }
 }

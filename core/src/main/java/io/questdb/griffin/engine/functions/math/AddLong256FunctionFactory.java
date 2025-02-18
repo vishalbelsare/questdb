@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -49,10 +49,9 @@ public class AddLong256FunctionFactory implements FunctionFactory {
     }
 
     private static class AddLong256Func extends Long256Function implements BinaryFunction {
+        final Function left;
         final Long256Impl long256A = new Long256Impl();
         final Long256Impl long256B = new Long256Impl();
-
-        final Function left;
         final Function right;
 
         public AddLong256Func(Function left, Function right) {
@@ -66,12 +65,7 @@ public class AddLong256FunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public Function getRight() {
-            return right;
-        }
-
-        @Override
-        public void getLong256(Record rec, CharSink sink) {
+        public void getLong256(Record rec, CharSink<?> sink) {
             Long256Impl v = (Long256Impl) getLong256A(rec);
             v.toSink(sink);
         }
@@ -84,6 +78,21 @@ public class AddLong256FunctionFactory implements FunctionFactory {
         @Override
         public Long256 getLong256B(Record rec) {
             return Long256Impl.add(long256B, left.getLong256B(rec), right.getLong256B(rec));
+        }
+
+        @Override
+        public String getName() {
+            return "+";
+        }
+
+        @Override
+        public Function getRight() {
+            return right;
+        }
+
+        @Override
+        public boolean isOperator() {
+            return true;
         }
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,18 +25,14 @@
 package io.questdb.cairo.sql;
 
 /**
- * Used internally for vector-based row access
+ * Used internally for index-based (but not only) row access.
  */
 public interface RowCursor {
+
     /**
      * @return true if cursor has more rows, otherwise false.
      */
     boolean hasNext();
-
-    /**
-     * @return numeric index of the next row
-     */
-    long next();
 
     /**
      * Iterates or jumps to given position. Jumping to position has to be performed before
@@ -45,6 +41,13 @@ public interface RowCursor {
      * @param position row position to jump
      */
     default void jumpTo(long position) {
-        while (position-- > 0 && hasNext()) next();
+        while (position-- > 0 && hasNext()) {
+            next();
+        }
     }
+
+    /**
+     * @return numeric index of the next row
+     */
+    long next();
 }

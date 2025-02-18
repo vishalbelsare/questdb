@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ package io.questdb.griffin.engine.functions;
 
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.SymbolTableSource;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 
@@ -39,6 +40,19 @@ public interface TernaryFunction extends Function {
     }
 
     @Override
+    default void cursorClosed() {
+        getLeft().cursorClosed();
+        getCenter().cursorClosed();
+        getRight().cursorClosed();
+    }
+
+    Function getCenter();
+
+    Function getLeft();
+
+    Function getRight();
+
+    @Override
     default void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
         getLeft().init(symbolTableSource, executionContext);
         getCenter().init(symbolTableSource, executionContext);
@@ -46,8 +60,20 @@ public interface TernaryFunction extends Function {
     }
 
     @Override
+    default void initCursor() {
+        getLeft().initCursor();
+        getCenter().initCursor();
+        getRight().initCursor();
+    }
+
+    @Override
     default boolean isConstant() {
         return getLeft().isConstant() && getCenter().isConstant() && getRight().isConstant();
+    }
+
+    @Override
+    default boolean isThreadSafe() {
+        return getLeft().isThreadSafe() && getCenter().isThreadSafe() && getRight().isThreadSafe();
     }
 
     @Override
@@ -64,8 +90,13 @@ public interface TernaryFunction extends Function {
     }
 
     @Override
-    default boolean isReadThreadSafe() {
-        return getLeft().isReadThreadSafe() && getCenter().isReadThreadSafe() && getRight().isReadThreadSafe();
+    default boolean supportsParallelism() {
+        return getLeft().supportsParallelism() && getCenter().supportsParallelism() && getRight().supportsParallelism();
+    }
+
+    @Override
+    default void toPlan(PlanSink sink) {
+        sink.val(getName()).val('(').val(getLeft()).val(',').val(getCenter()).val(',').val(getRight()).val(')');
     }
 
     @Override
@@ -74,10 +105,4 @@ public interface TernaryFunction extends Function {
         getCenter().toTop();
         getRight().toTop();
     }
-
-    Function getLeft();
-
-    Function getCenter();
-
-    Function getRight();
 }

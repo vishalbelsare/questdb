@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -34,20 +34,25 @@ import java.io.Closeable;
 
 public final class Epoll implements Closeable {
     private static final Log LOG = LogFactory.getLog(Epoll.class);
-    private final long events;
-    private final long epollFd;
+
     private final int capacity;
     private final EpollFacade epf;
-    private boolean closed = false;
+    private final long epollFd;
+    private final long events;
     private long _rPtr;
+    private boolean closed = false;
 
     public Epoll(EpollFacade epf, int capacity) {
         this.epf = epf;
         this.capacity = capacity;
-        this.events = _rPtr = Unsafe.calloc(EpollAccessor.SIZEOF_EVENT * (long) capacity, MemoryTag.NATIVE_DEFAULT);
-        // todo: this can be unsuccessful
-        this.epollFd = epf.epollCreate();
-        Files.bumpFileCount(this.epollFd);
+        long size = EpollAccessor.SIZEOF_EVENT * (long) capacity;
+        this.events = this._rPtr = Unsafe.calloc(size, MemoryTag.NATIVE_IO_DISPATCHER_RSS);
+        int epollFd = epf.epollCreate();
+        if (epollFd < 0) {
+            Unsafe.free(events, size, MemoryTag.NATIVE_IO_DISPATCHER_RSS);
+            throw NetworkError.instance(epf.errno(), "could not create epoll");
+        }
+        this.epollFd = Files.createUniqueFd(epollFd);
     }
 
     @Override
@@ -56,7 +61,7 @@ public final class Epoll implements Closeable {
             return;
         }
         epf.getNetworkFacade().close(epollFd, LOG);
-        Unsafe.free(events, EpollAccessor.SIZEOF_EVENT * (long) capacity, MemoryTag.NATIVE_DEFAULT);
+        Unsafe.free(events, EpollAccessor.SIZEOF_EVENT * (long) capacity, MemoryTag.NATIVE_IO_DISPATCHER_RSS);
         closed = true;
     }
 
@@ -77,23 +82,25 @@ public final class Epoll implements Closeable {
     public void listen(long sfd) {
         Unsafe.getUnsafe().putInt(events + EpollAccessor.EVENTS_OFFSET, EpollAccessor.EPOLLIN | EpollAccessor.EPOLLET);
         Unsafe.getUnsafe().putLong(events + EpollAccessor.DATA_OFFSET, 0);
-
         if (epf.epollCtl(epollFd, EpollAccessor.EPOLL_CTL_ADD, sfd, events) != 0) {
             throw NetworkError.instance(epf.errno(), "epoll_ctl");
         }
     }
 
-    public void removeListen(long sfd) {
-        Unsafe.getUnsafe().putInt(events + EpollAccessor.EVENTS_OFFSET, EpollAccessor.EPOLLIN | EpollAccessor.EPOLLET);
-        Unsafe.getUnsafe().putLong(events + EpollAccessor.DATA_OFFSET, 0);
-
-        if (epf.epollCtl(epollFd, EpollAccessor.EPOLL_CTL_DEL, sfd, events) != 0) {
-            throw NetworkError.instance(epf.errno(), "epoll_ctl");
-        }
+    public int poll(int timeout) {
+        return epf.epollWait(epollFd, events, capacity, timeout);
     }
 
     public int poll() {
-        return epf.epollWait(epollFd, events, capacity, 0);
+        return poll(0);
+    }
+
+    public void removeListen(long sfd) {
+        Unsafe.getUnsafe().putInt(events + EpollAccessor.EVENTS_OFFSET, EpollAccessor.EPOLLIN | EpollAccessor.EPOLLET);
+        Unsafe.getUnsafe().putLong(events + EpollAccessor.DATA_OFFSET, 0);
+        if (epf.epollCtl(epollFd, EpollAccessor.EPOLL_CTL_DEL, sfd, events) != 0) {
+            throw NetworkError.instance(epf.errno(), "epoll_ctl");
+        }
     }
 
     public void setOffset(int offset) {

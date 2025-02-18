@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -40,12 +40,12 @@ import static io.questdb.griffin.SqlCodeGenerator.GKK_HOUR_INT;
 public class MaxDoubleVectorAggregateFunction extends DoubleFunction implements VectorAggregateFunction {
 
     public static final DoubleBinaryOperator MAX = Math::max;
-    private final DoubleAccumulator max = new DoubleAccumulator(
-            MAX, Double.NEGATIVE_INFINITY
-    );
     private final int columnIndex;
     private final DistinctFunc distinctFunc;
     private final KeyValueFunc keyValueFunc;
+    private final DoubleAccumulator max = new DoubleAccumulator(
+            MAX, Double.NEGATIVE_INFINITY
+    );
     private int valueOffset;
 
     public MaxDoubleVectorAggregateFunction(int keyKind, int columnIndex, int workerCount) {
@@ -60,9 +60,9 @@ public class MaxDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void aggregate(long address, long addressSize, int columnSizeHint, int workerId) {
+    public void aggregate(long address, long frameRowCount, int workerId) {
         if (address != 0) {
-            final double value = Vect.maxDouble(address, addressSize / Double.BYTES);
+            final double value = Vect.maxDouble(address, frameRowCount);
             if (value == value) {
                 max.accumulate(value);
             }
@@ -70,17 +70,33 @@ public class MaxDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void aggregate(long pRosti, long keyAddress, long valueAddress, long valueAddressSize, int columnSizeShr, int workerId) {
+    public boolean aggregate(long pRosti, long keyAddress, long valueAddress, long frameRowCount) {
         if (valueAddress == 0) {
-            distinctFunc.run(pRosti, keyAddress, valueAddressSize / Double.BYTES);
+            return distinctFunc.run(pRosti, keyAddress, frameRowCount);
         } else {
-            keyValueFunc.run(pRosti, keyAddress, valueAddress, valueAddressSize / Double.BYTES, valueOffset);
+            return keyValueFunc.run(pRosti, keyAddress, valueAddress, frameRowCount, valueOffset);
         }
+    }
+
+    @Override
+    public void clear() {
+        max.reset();
     }
 
     @Override
     public int getColumnIndex() {
         return columnIndex;
+    }
+
+    @Override
+    public double getDouble(Record rec) {
+        final double value = max.get();
+        return Double.isInfinite(value) ? Double.NaN : value;
+    }
+
+    @Override
+    public String getName() {
+        return "max";
     }
 
     @Override
@@ -94,8 +110,8 @@ public class MaxDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void merge(long pRostiA, long pRostiB) {
-        Rosti.keyedIntMaxDoubleMerge(pRostiA, pRostiB, valueOffset);
+    public boolean merge(long pRostiA, long pRostiB) {
+        return Rosti.keyedIntMaxDoubleMerge(pRostiA, pRostiB, valueOffset);
     }
 
     @Override
@@ -105,23 +121,7 @@ public class MaxDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void wrapUp(long pRosti) {
-        Rosti.keyedIntMaxDoubleWrapUp(pRosti, valueOffset, max.get());
-    }
-
-    @Override
-    public void clear() {
-        max.reset();
-    }
-
-    @Override
-    public double getDouble(Record rec) {
-        final double value = max.get();
-        return Double.isInfinite(value) ? Double.NaN : value;
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return false;
+    public boolean wrapUp(long pRosti) {
+        return Rosti.keyedIntMaxDoubleWrapUp(pRosti, valueOffset, max.get());
     }
 }

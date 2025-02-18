@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,144 +24,202 @@
 
 package io.questdb.cairo;
 
+import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.cairo.sql.TableMetadata;
 import io.questdb.cairo.vm.Vm;
 import io.questdb.cairo.vm.api.MemoryMR;
 import io.questdb.std.Chars;
-import io.questdb.std.LowerCaseCharSequenceIntHashMap;
-import io.questdb.std.ObjList;
 
-public class TableWriterMetadata extends BaseRecordMetadata {
-    private final int id;
-    private final int metaFileSize;
-    private int symbolMapCount;
-    private int version;
+import static io.questdb.cairo.TableUtils.META_OFFSET_PARTITION_BY;
+
+public class TableWriterMetadata extends AbstractRecordMetadata implements TableMetadata, TableStructure {
     private int maxUncommittedRows;
-    private long commitLag;
-    private long structureVersion;
+    private long metadataVersion;
+    private long o3MaxLag;
+    private int partitionBy;
+    private int symbolMapCount;
+    private int tableId;
+    private TableToken tableToken;
+    private int ttlHoursOrMonths;
+    private boolean walEnabled;
 
-    public TableWriterMetadata(MemoryMR metaMem) {
-        this.columnCount = metaMem.getInt(TableUtils.META_OFFSET_COUNT);
-        this.columnNameIndexMap = new LowerCaseCharSequenceIntHashMap(columnCount);
-        this.version = metaMem.getInt(TableUtils.META_OFFSET_VERSION);
-        this.id = metaMem.getInt(TableUtils.META_OFFSET_TABLE_ID);
-        this.maxUncommittedRows = metaMem.getInt(TableUtils.META_OFFSET_MAX_UNCOMMITTED_ROWS);
-        this.commitLag = metaMem.getLong(TableUtils.META_OFFSET_COMMIT_LAG);
-        TableUtils.validate(metaMem, columnNameIndexMap, ColumnType.VERSION);
-        this.timestampIndex = metaMem.getInt(TableUtils.META_OFFSET_TIMESTAMP_INDEX);
-        this.columnMetadata = new ObjList<>(this.columnCount);
-        this.structureVersion = metaMem.getLong(TableUtils.META_OFFSET_STRUCTURE_VERSION);
-
-        long offset = TableUtils.getColumnNameOffset(columnCount);
-        this.symbolMapCount = 0;
-        columnNameIndexMap.clear();
-        // don't create strings in this loop, we already have them in columnNameIndexMap
-        for (int i = 0; i < columnCount; i++) {
-            CharSequence name = metaMem.getStr(offset);
-            assert name != null;
-            int type = TableUtils.getColumnType(metaMem, i);
-            String nameStr = Chars.toString(name);
-            columnMetadata.add(
-                    new TableColumnMetadata(
-                            nameStr,
-                            TableUtils.getColumnHash(metaMem, i),
-                            type,
-                            TableUtils.isColumnIndexed(metaMem, i),
-                            TableUtils.getIndexBlockCapacity(metaMem, i),
-                            true,
-                            null,
-                            i
-                    )
-            );
-            columnNameIndexMap.put(nameStr, i);
-            if (ColumnType.isSymbol(type)) {
-                symbolMapCount++;
-            }
-            offset += Vm.getStorageLength(name);
-        }
-        metaFileSize = (int) offset;
+    public TableWriterMetadata(TableToken tableToken) {
+        this.tableToken = tableToken;
     }
 
-    public long getCommitLag() {
-        return commitLag;
+    @Override
+    public void close() {
+        // nothing to release
     }
 
-    public int getDenseColumnCount() {
-        int count = 0;
-        for (int i = 0; i < columnCount; i++) {
-            if (columnMetadata.getQuick(i).getType() > 0) {
-                count++;
-            }
-        }
-        return count;
+    @Override
+    public int getIndexBlockCapacity(int columnIndex) {
+        return getColumnMetadata(columnIndex).getIndexValueBlockCapacity();
     }
 
-    public void setCommitLag(long micros) {
-        this.commitLag = micros;
-    }
-
-    public int getFileDataSize() {
-        return metaFileSize;
-    }
-
-    public int getId() {
-        return id;
-    }
-
+    @Override
     public int getMaxUncommittedRows() {
         return maxUncommittedRows;
     }
 
-    public void setMaxUncommittedRows(int rows) {
-        this.maxUncommittedRows = rows;
+    @Override
+    public long getMetadataVersion() {
+        return metadataVersion;
     }
 
-    public long getStructureVersion() {
-        return structureVersion;
+    @Override
+    public long getO3MaxLag() {
+        return o3MaxLag;
     }
 
-    public void setStructureVersion(long value) {
-        this.structureVersion = value;
+    @Override
+    public int getPartitionBy() {
+        return partitionBy;
+    }
+
+    public int getReplacingColumnIndex(int columnIndex) {
+        WriterTableColumnMetadata columnMeta = (WriterTableColumnMetadata) columnMetadata.get(columnIndex);
+        return columnMeta.getReplacingIndex();
+    }
+
+    @Override
+    public boolean getSymbolCacheFlag(int columnIndex) {
+        return getColumnMetadata(columnIndex).isSymbolCacheFlag();
+    }
+
+    @Override
+    public int getSymbolCapacity(int columnIndex) {
+        return getColumnMetadata(columnIndex).getSymbolCapacity();
     }
 
     public int getSymbolMapCount() {
         return symbolMapCount;
     }
 
-    public int getTableVersion() {
-        return version;
+    @Override
+    public int getTableId() {
+        return tableId;
     }
 
-    public void setTableVersion() {
-        version = ColumnType.VERSION;
+    @Override
+    public CharSequence getTableName() {
+        return tableToken.getTableName();
     }
 
-    public GenericRecordMetadata copyDense() {
-        GenericRecordMetadata metadata = new GenericRecordMetadata();
+    @Override
+    public TableToken getTableToken() {
+        return tableToken;
+    }
+
+    @Override
+    public int getTtlHoursOrMonths() {
+        return ttlHoursOrMonths;
+    }
+
+    @Override
+    public boolean isIndexed(int columnIndex) {
+        return getColumnMetadata(columnIndex).isSymbolIndexFlag();
+    }
+
+    @Override
+    public boolean isWalEnabled() {
+        return walEnabled;
+    }
+
+    public final void reload(MemoryMR metaMem) {
+        this.partitionBy = metaMem.getInt(META_OFFSET_PARTITION_BY);
+        this.columnCount = metaMem.getInt(TableUtils.META_OFFSET_COUNT);
+        this.columnNameIndexMap.clear();
+        this.tableId = metaMem.getInt(TableUtils.META_OFFSET_TABLE_ID);
+        this.maxUncommittedRows = metaMem.getInt(TableUtils.META_OFFSET_MAX_UNCOMMITTED_ROWS);
+        this.o3MaxLag = metaMem.getLong(TableUtils.META_OFFSET_O3_MAX_LAG);
+        TableUtils.validateMeta(metaMem, columnNameIndexMap, ColumnType.VERSION);
+        this.timestampIndex = metaMem.getInt(TableUtils.META_OFFSET_TIMESTAMP_INDEX);
+        this.columnMetadata.clear();
+        this.metadataVersion = metaMem.getLong(TableUtils.META_OFFSET_METADATA_VERSION);
+        this.walEnabled = metaMem.getBool(TableUtils.META_OFFSET_WAL_ENABLED);
+        this.ttlHoursOrMonths = TableUtils.getTtlHoursOrMonths(metaMem);
+
+        long offset = TableUtils.getColumnNameOffset(columnCount);
+        this.symbolMapCount = 0;
+        columnNameIndexMap.clear();
+        // don't create strings in this loop, we already have them in columnNameIndexMap
         for (int i = 0; i < columnCount; i++) {
-            TableColumnMetadata column = columnMetadata.getQuick(i);
-            if (column.getType() >= 0) {
-                metadata.add(column);
-                if (i == timestampIndex) {
-                    metadata.setTimestampIndex(metadata.getColumnCount() - 1);
+            CharSequence name = metaMem.getStrA(offset);
+            assert name != null;
+            int type = TableUtils.getColumnType(metaMem, i);
+            String nameStr = Chars.toString(name);
+            columnMetadata.add(
+                    new WriterTableColumnMetadata(
+                            nameStr,
+                            type,
+                            TableUtils.isColumnIndexed(metaMem, i),
+                            TableUtils.getIndexBlockCapacity(metaMem, i),
+                            true,
+                            null,
+                            i,
+                            TableUtils.getSymbolCapacity(metaMem, i),
+                            TableUtils.isColumnDedupKey(metaMem, i),
+                            TableUtils.getReplacingColumnIndex(metaMem, i),
+                            TableUtils.isSymbolCached(metaMem, i)
+                    )
+            );
+            if (type > -1) {
+                columnNameIndexMap.put(nameStr, i);
+                if (ColumnType.isSymbol(type)) {
+                    symbolMapCount++;
                 }
             }
+            offset += Vm.getStorageLength(name);
         }
-        return metadata;
     }
 
-    void addColumn(CharSequence name, long hash, int type, boolean indexFlag, int indexValueBlockCapacity, int columnIndex) {
+    public void setMaxUncommittedRows(int rows) {
+        this.maxUncommittedRows = rows;
+    }
+
+    public void setMetadataVersion(long value) {
+        this.metadataVersion = value;
+    }
+
+    public void setO3MaxLag(long o3MaxLagUs) {
+        this.o3MaxLag = o3MaxLagUs;
+    }
+
+    public void setTtlHoursOrMonths(int ttlHoursOrMonths) {
+        this.ttlHoursOrMonths = ttlHoursOrMonths;
+    }
+
+    public void updateTableToken(TableToken tableToken) {
+        this.tableToken = tableToken;
+    }
+
+    void addColumn(
+            CharSequence name,
+            int type,
+            boolean indexFlag,
+            int indexValueBlockCapacity,
+            int columnIndex,
+            int symbolCapacity,
+            boolean isDedupKey,
+            int replacingIndex,
+            boolean isSymbolCached
+    ) {
         String str = name.toString();
         columnNameIndexMap.put(str, columnMetadata.size());
         columnMetadata.add(
-                new TableColumnMetadata(
+                new WriterTableColumnMetadata(
                         str,
-                        hash,
                         type,
                         indexFlag,
                         indexValueBlockCapacity,
                         true,
                         null,
-                        columnIndex
+                        columnIndex,
+                        symbolCapacity,
+                        isDedupKey,
+                        replacingIndex,
+                        isSymbolCached
                 )
         );
         columnCount++;
@@ -170,34 +228,56 @@ public class TableWriterMetadata extends BaseRecordMetadata {
         }
     }
 
+    void clearTimestampIndex() {
+        this.timestampIndex = -1;
+    }
+
     void removeColumn(int columnIndex) {
         TableColumnMetadata deletedMeta = columnMetadata.getQuick(columnIndex);
-        if (ColumnType.isSymbol(deletedMeta.getType())) {
+        if (ColumnType.isSymbol(deletedMeta.getColumnType())) {
             symbolMapCount--;
         }
         deletedMeta.markDeleted();
-        columnNameIndexMap.remove(deletedMeta.getName());
-
-        // enumerate columns that would have moved up after column deletion
-        for (int i = columnIndex + 1; i < columnCount; i++) {
-            TableColumnMetadata columnMeta = columnMetadata.getQuick(i);
-            if (columnMeta.getType() > 0) {
-                columnNameIndexMap.put(columnMeta.getName(), i);
-            }
-        }
+        columnNameIndexMap.remove(deletedMeta.getColumnName());
     }
 
     void renameColumn(CharSequence name, CharSequence newName) {
-        int index = columnNameIndexMap.keyIndex(name);
-        int columnIndex = columnNameIndexMap.valueAt(index);
-        columnNameIndexMap.removeAt(index);
-        columnNameIndexMap.putAt(columnNameIndexMap.keyIndex(newName), newName, columnIndex);
-        //
+        final int columnIndex = columnNameIndexMap.removeEntry(name);
+        String newNameStr = Chars.toString(newName);
+        columnNameIndexMap.put(newNameStr, columnIndex);
+
         TableColumnMetadata oldColumnMetadata = columnMetadata.get(columnIndex);
-        oldColumnMetadata.setName(Chars.toString(newName));
+        oldColumnMetadata.rename(newNameStr);
     }
 
-    void setTimestampIndex(int index) {
-        this.timestampIndex = index;
+    protected static class WriterTableColumnMetadata extends TableColumnMetadata {
+
+        public WriterTableColumnMetadata(
+                String nameStr,
+                int type,
+                boolean columnIndexed,
+                int indexBlockCapacity,
+                boolean symbolTableStatic,
+                RecordMetadata parent,
+                int i,
+                int symbolCapacity,
+                boolean isDedupKey,
+                int replacingIndex,
+                boolean symbolCached
+        ) {
+            super(
+                    nameStr,
+                    type,
+                    columnIndexed,
+                    indexBlockCapacity,
+                    symbolTableStatic,
+                    parent,
+                    i,
+                    isDedupKey,
+                    replacingIndex,
+                    symbolCached,
+                    symbolCapacity
+            );
+        }
     }
 }

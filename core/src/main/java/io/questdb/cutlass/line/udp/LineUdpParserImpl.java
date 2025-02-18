@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,17 +24,32 @@
 
 package io.questdb.cutlass.line.udp;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.CairoException;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.TableStructure;
+import io.questdb.cairo.TableToken;
+import io.questdb.cairo.TableUtils;
+import io.questdb.cairo.TableWriter;
+import io.questdb.cairo.security.AllowAllSecurityContext;
 import io.questdb.cairo.sql.RecordMetadata;
 import io.questdb.cairo.vm.Vm;
 import io.questdb.cairo.vm.api.MemoryMARW;
-import io.questdb.cutlass.line.LineProtoTimestampAdapter;
-import io.questdb.cutlass.line.udp.LineUdpParserSupport.BadCastException;
+import io.questdb.cutlass.line.LineTimestampAdapter;
 import io.questdb.log.Log;
 import io.questdb.log.LogFactory;
-import io.questdb.std.*;
+import io.questdb.std.CharSequenceObjHashMap;
+import io.questdb.std.Chars;
+import io.questdb.std.IntList;
+import io.questdb.std.LongList;
+import io.questdb.std.Misc;
+import io.questdb.std.Numbers;
+import io.questdb.std.NumericException;
 import io.questdb.std.datetime.microtime.MicrosecondClock;
 import io.questdb.std.str.Path;
+import io.questdb.std.str.Sinkable;
 
 import java.io.Closeable;
 
@@ -43,53 +58,54 @@ import static io.questdb.cairo.TableUtils.TABLE_EXISTS;
 
 public class LineUdpParserImpl implements LineUdpParser, Closeable {
     private final static Log LOG = LogFactory.getLog(LineUdpParserImpl.class);
-    private static final String WRITER_LOCK_REASON = "ilpUdp";
-    private static final LineEndParser NOOP_LINE_END = cache -> {
+    private static final FieldNameParser NOOP_FIELD_NAME = name -> {
     };
     private static final FieldValueParser NOOP_FIELD_VALUE = (value, cache) -> {
     };
-    private static final FieldNameParser NOOP_FIELD_NAME = name -> {
+    private static final LineEndParser NOOP_LINE_END = cache -> {
     };
-
-    private final CairoEngine engine;
-    private final CharSequenceObjHashMap<CacheEntry> writerCache = new CharSequenceObjHashMap<>();
-    private final CharSequenceObjHashMap<TableWriter> commitList = new CharSequenceObjHashMap<>();
-    private final Path path = new Path();
-    private final CairoConfiguration configuration;
-    private final LongList columnNameType = new LongList();
-    private final LongList columnIndexAndType = new LongList();
-    private final IntList geoHashBitsSizeByColIdx = new IntList(); // 0 if not a GeoHash, else bits precision
-    private final LongList columnValues = new LongList();
-    private final MemoryMARW ddlMem = Vm.getMARWInstance();
+    private static final String WRITER_LOCK_REASON = "ilpUdp";
+    private final boolean autoCreateNewColumns;
+    private final boolean autoCreateNewTables;
     private final MicrosecondClock clock;
-    private final FieldNameParser MY_NEW_FIELD_NAME = this::parseFieldNameNewTable;
-    private final FieldValueParser MY_NEW_TAG_VALUE = this::parseTagValueNewTable;
-    private final TableStructureAdapter tableStructureAdapter = new TableStructureAdapter();
-    private final CairoSecurityContext cairoSecurityContext;
-    private final LineProtoTimestampAdapter timestampAdapter;
-    private final LineUdpReceiverConfiguration udpConfiguration;
+    private final LongList columnIndexAndType = new LongList();
+    private final LongList columnNameType = new LongList();
+    private final LongList columnValues = new LongList();
+    private final CharSequenceObjHashMap<TableWriter> commitList = new CharSequenceObjHashMap<>();
+    private final CairoConfiguration configuration;
+    private final MemoryMARW ddlMem = Vm.getCMARWInstance();
     private final short defaultFloatColumnType;
     private final short defaultIntegerColumnType;
+    private final CairoEngine engine;
+    private final IntList geoHashBitsSizeByColIdx = new IntList(); // 0 if not a GeoHash, else bits precision
+    private final FieldValueParser MY_NEW_TAG_VALUE = this::parseTagValueNewTable;
+    private final Path path = new Path();
+    private final TableStructureAdapter tableStructureAdapter = new TableStructureAdapter();
+    private final LineTimestampAdapter timestampAdapter;
+    private final LineUdpReceiverConfiguration udpConfiguration;
+    private final boolean useLegacyStringDefault;
+    private final CharSequenceObjHashMap<CacheEntry> writerCache = new CharSequenceObjHashMap<>();
     // state
     // cache entry index is always a negative value
     private int cacheEntryIndex = 0;
-    private TableWriter writer;
-    private final LineEndParser MY_LINE_END = this::appendRow;
-    private RecordMetadata metadata;
-    private int columnCount;
     private int columnIndex;
     private long columnName;
     private int columnType;
+    private RecordMetadata metadata;
     private final FieldNameParser MY_FIELD_NAME = this::parseFieldName;
-    private long tableName;
-    private final LineEndParser MY_NEW_LINE_END = this::createTableAndAppendRow;
-    private LineEndParser onLineEnd;
     private FieldNameParser onFieldName;
     private FieldValueParser onFieldValue;
+    private LineEndParser onLineEnd;
     private FieldValueParser onTagValue;
+    private final FieldNameParser MY_NEW_FIELD_NAME = this::parseFieldNameNewTable;
+    private final FieldValueParser MY_NEW_FIELD_VALUE = this::parseFieldValueNewTable;
+    private long tableName;
+    private TableToken tableToken;
+    private TableWriter writer;
+    private final LineEndParser MY_LINE_END = this::appendRow;
+    private final LineEndParser MY_NEW_LINE_END = this::createTableAndAppendRow;
     private final FieldValueParser MY_TAG_VALUE = this::parseTagValue;
     private final FieldValueParser MY_FIELD_VALUE = this::parseFieldValue;
-    private final FieldValueParser MY_NEW_FIELD_VALUE = this::parseFieldValueNewTable;
 
     public LineUdpParserImpl(
             CairoEngine engine,
@@ -99,11 +115,14 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         this.clock = configuration.getMicrosecondClock();
         this.engine = engine;
         this.udpConfiguration = udpConfiguration;
-        this.cairoSecurityContext = udpConfiguration.getCairoSecurityContext();
         this.timestampAdapter = udpConfiguration.getTimestampAdapter();
 
-        defaultFloatColumnType = udpConfiguration.getDefaultColumnTypeForFloat();
-        defaultIntegerColumnType = udpConfiguration.getDefaultColumnTypeForInteger();
+        this.defaultFloatColumnType = udpConfiguration.getDefaultColumnTypeForFloat();
+        this.defaultIntegerColumnType = udpConfiguration.getDefaultColumnTypeForInteger();
+        this.useLegacyStringDefault = udpConfiguration.isUseLegacyStringDefault();
+
+        this.autoCreateNewTables = udpConfiguration.getAutoCreateNewTables();
+        this.autoCreateNewColumns = udpConfiguration.getAutoCreateNewColumns();
     }
 
     @Override
@@ -115,12 +134,13 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         }
     }
 
-    public void commitAll(int commitMode) {
+    public void commitAll() {
         if (writer != null) {
-            writer.commit(commitMode);
+            writer.commit();
         }
         for (int i = 0, n = commitList.size(); i < n; i++) {
-            commitList.valueQuick(i).commit(commitMode);
+            //noinspection resource
+            commitList.valueQuick(i).commit();
         }
         commitList.clear();
     }
@@ -132,7 +152,6 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
 
     @Override
     public void onEvent(CachedCharSequence token, int eventType, CharSequenceCache cache) {
-
         switch (eventType) {
             case EVT_MEASUREMENT:
                 int wrtIndex = writerCache.keyIndex(token);
@@ -180,10 +199,9 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
     }
 
     private void appendFirstRowAndCacheWriter(CharSequenceCache cache) {
-        TableWriter writer = engine.getWriter(cairoSecurityContext, cache.get(tableName), WRITER_LOCK_REASON);
+        TableWriter writer = engine.getWriter(tableToken, WRITER_LOCK_REASON);
         this.writer = writer;
         this.metadata = writer.getMetadata();
-        this.columnCount = metadata.getColumnCount();
         writerCache.valueAtQuick(cacheEntryIndex).writer = writer;
 
         final int columnCount = columnNameType.size() / 2;
@@ -192,20 +210,16 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
             return;
         }
 
-        try {
-            for (int i = 0; i < columnCount; i++) {
-                LineUdpParserSupport.putValue(
-                        row,
-                        (int) columnNameType.getQuick(i * 2 + 1),
-                        geoHashBitsSizeByColIdx.getQuick(i),
-                        i,
-                        cache.get(columnValues.getQuick(i))
-                );
-            }
-            row.append();
-        } catch (BadCastException ignore) {
-            row.cancel();
+        for (int i = 0; i < columnCount; i++) {
+            LineUdpParserSupport.putValue(
+                    row,
+                    (int) columnNameType.getQuick(i * 2 + 1),
+                    geoHashBitsSizeByColIdx.getQuick(i),
+                    i,
+                    cache.get(columnValues.getQuick(i))
+            );
         }
+        row.append();
     }
 
     private void appendRow(CharSequenceCache cache) {
@@ -215,26 +229,23 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
             return;
         }
 
-        try {
-            for (int i = 0; i < columnCount; i++) {
-                final long value = columnIndexAndType.getQuick(i);
-                LineUdpParserSupport.putValue(
-                        row,
-                        Numbers.decodeHighInt(value),
-                        geoHashBitsSizeByColIdx.getQuick(i),
-                        Numbers.decodeLowInt(value),
-                        cache.get(columnValues.getQuick(i))
-                );
-            }
-            row.append();
-        } catch (BadCastException ignore) {
-            row.cancel();
+        for (int i = 0; i < columnCount; i++) {
+            final long value = columnIndexAndType.getQuick(i);
+            LineUdpParserSupport.putValue(
+                    row,
+                    Numbers.decodeHighInt(value),
+                    geoHashBitsSizeByColIdx.getQuick(i),
+                    Numbers.decodeLowInt(value),
+                    cache.get(columnValues.getQuick(i))
+            );
         }
+        row.append();
     }
 
-    private void cacheWriter(CacheEntry entry, CachedCharSequence tableName) {
+    private void cacheWriter(CacheEntry entry, CachedCharSequence tableName, TableToken tableToken) {
         try {
-            entry.writer = engine.getWriter(cairoSecurityContext, tableName, WRITER_LOCK_REASON);
+            entry.writer = engine.getWriter(tableToken, WRITER_LOCK_REASON);
+            this.tableToken = tableToken;
             this.tableName = tableName.getCacheAddress();
             createState(entry);
             LOG.info().$("cached writer [name=").$(tableName).$(']').$();
@@ -268,30 +279,42 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
     private void createState(CacheEntry entry) {
         writer = entry.writer;
         metadata = writer.getMetadata();
-        columnCount = metadata.getColumnCount();
         switchModeToAppend();
     }
 
     private void createTableAndAppendRow(CharSequenceCache cache) {
-        engine.createTable(
-                cairoSecurityContext,
+        tableToken = engine.createTable(
+                AllowAllSecurityContext.INSTANCE,
                 ddlMem,
                 path,
-                tableStructureAdapter.of(cache)
+                true,
+                tableStructureAdapter.of(cache),
+                false
         );
         appendFirstRowAndCacheWriter(cache);
     }
 
     private void initCacheEntry(CachedCharSequence token, CacheEntry entry) {
+        TableToken tableToken = engine.getTableTokenIfExists(token);
         switch (entry.state) {
             case 0:
-                int exists = engine.getStatus(cairoSecurityContext, path, token);
+                int exists = engine.getTableStatus(path, tableToken);
                 switch (exists) {
                     case TABLE_EXISTS:
                         entry.state = 1;
-                        cacheWriter(entry, token);
+                        cacheWriter(entry, token, tableToken);
                         break;
                     case TABLE_DOES_NOT_EXIST:
+                        if (!autoCreateNewTables) {
+                            throw CairoException.nonCritical()
+                                    .put("table does not exist, creating new tables is disabled [table=").put(token)
+                                    .put(']');
+                        }
+                        if (!autoCreateNewColumns) {
+                            throw CairoException.nonCritical()
+                                    .put("table does not exist, cannot create table, creating new columns is disabled [table=").put(token)
+                                    .put(']');
+                        }
                         tableName = token.getCacheAddress();
                         if (onLineEnd != MY_NEW_LINE_END) {
                             onLineEnd = MY_NEW_LINE_END;
@@ -307,7 +330,7 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
                 }
                 break;
             case 1:
-                cacheWriter(entry, token);
+                cacheWriter(entry, token, tableToken);
                 break;
             default:
                 switchModeToSkipLine();
@@ -319,17 +342,24 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         columnIndex = metadata.getColumnIndexQuiet(token);
         if (columnIndex > -1) {
             columnType = metadata.getColumnType(columnIndex);
-        } else {
+        }
+
+        if (columnIndex < 0 || columnType < 0) {
             prepareNewColumn(token);
         }
     }
 
     private void parseFieldNameNewTable(CachedCharSequence token) {
+        if (!TableUtils.isValidColumnName(token, udpConfiguration.getMaxFileNameLength())) {
+            LOG.error().$("invalid column name [columnName=").$(token).I$();
+            switchModeToSkipLine();
+            return;
+        }
         columnNameType.add(token.getCacheAddress());
     }
 
     private void parseFieldValue(CachedCharSequence value, CharSequenceCache cache) {
-        int valueType = LineUdpParserSupport.getValueType(value, defaultFloatColumnType, defaultIntegerColumnType);
+        int valueType = LineUdpParserSupport.getValueType(value, defaultFloatColumnType, defaultIntegerColumnType, useLegacyStringDefault);
         if (valueType == ColumnType.UNDEFINED) {
             switchModeToSkipLine();
         } else {
@@ -337,9 +367,8 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         }
     }
 
-    @SuppressWarnings("unused")
     private void parseFieldValueNewTable(CachedCharSequence value, CharSequenceCache cache) {
-        int valueType = LineUdpParserSupport.getValueType(value, defaultFloatColumnType, defaultIntegerColumnType);
+        int valueType = LineUdpParserSupport.getValueType(value, defaultFloatColumnType, defaultIntegerColumnType, useLegacyStringDefault);
         if (valueType == ColumnType.UNDEFINED || valueType == ColumnType.NULL) { // cannot create a col of type null
             switchModeToSkipLine();
         } else {
@@ -351,7 +380,6 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         parseValue(value, ColumnType.SYMBOL, cache, false);
     }
 
-    @SuppressWarnings("unused")
     private void parseTagValueNewTable(CachedCharSequence value, CharSequenceCache cache) {
         parseValueNewTable(value, ColumnType.SYMBOL);
     }
@@ -389,8 +417,11 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
                         valid = columnTypeTag == ColumnType.BOOLEAN;
                         break;
                     case ColumnType.STRING:
+                    case ColumnType.VARCHAR:
                         valid = columnTypeTag == ColumnType.STRING ||
+                                columnTypeTag == ColumnType.VARCHAR ||
                                 columnTypeTag == ColumnType.CHAR ||
+                                columnTypeTag == ColumnType.IPv4 ||
                                 isForField &&
                                         (geoHashBits = ColumnType.getGeoHashBits(columnType)) != 0;
                         break;
@@ -420,7 +451,7 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
                 columnValues.add(value.getCacheAddress());
                 geoHashBitsSizeByColIdx.add(geoHashBits);
             } else {
-                LOG.error().$("mismatched column and value types [table=").$(writer.getTableName())
+                LOG.error().$("mismatched column and value types [table=").utf8(writer.getTableToken().getTableName())
                         .$(", column=").$(metadata.getColumnName(columnIndex))
                         .$(", columnType=").$(ColumnType.nameOf(columnType))
                         .$(", valueType=").$(ColumnType.nameOf(valueType))
@@ -429,13 +460,20 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
             }
         } else {
             CharSequence colNameAsChars = cache.get(columnName);
-            if (TableUtils.isValidColumnName(colNameAsChars)) {
+            if (autoCreateNewColumns && TableUtils.isValidColumnName(colNameAsChars, udpConfiguration.getMaxFileNameLength())) {
                 writer.addColumn(colNameAsChars, valueType);
-                columnIndexAndType.add(Numbers.encodeLowHighInts(columnCount++, valueType));
+                // Writer index can be different from column count, it keeps deleted columns in metadata
+                int columnIndex = writer.getColumnIndex(colNameAsChars);
+                columnIndexAndType.add(Numbers.encodeLowHighInts(columnIndex, valueType));
                 columnValues.add(value.getCacheAddress());
                 geoHashBitsSizeByColIdx.add(0);
+            } else if (!autoCreateNewColumns) {
+                throw CairoException.nonCritical()
+                        .put("column does not exist, creating new columns is disabled [table=").put(writer.getTableToken().getTableName())
+                        .put(", columnName=").put(colNameAsChars)
+                        .put(']');
             } else {
-                LOG.error().$("invalid column name [table=").$(writer.getTableName())
+                LOG.error().$("invalid column name [table=").utf8(writer.getTableToken().getTableName())
                         .$(", columnName=").$(colNameAsChars)
                         .$(']').$();
                 switchModeToSkipLine();
@@ -478,7 +516,12 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
             // add previous writer to commit list
             CacheEntry e = writerCache.valueAtQuick(cacheEntryIndex);
             if (e.writer != null) {
-                commitList.put(e.writer.getTableName(), e.writer);
+                if (Chars.equals(tableName, e.writer.getTableToken().getTableName())) {
+                    commitList.put(e.writer.getTableToken().getTableName(), e.writer);
+                } else {
+                    // Cannot happen except with WAL table rename and out of date TableWriter.tableToken.
+                    commitList.put(Chars.toString(tableName), e.writer);
+                }
             }
         }
 
@@ -502,11 +545,6 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
     }
 
     @FunctionalInterface
-    private interface LineEndParser {
-        void parse(CharSequenceCache cache);
-    }
-
-    @FunctionalInterface
     private interface FieldNameParser {
         void parse(CachedCharSequence name);
     }
@@ -516,9 +554,14 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         void parse(CachedCharSequence value, CharSequenceCache cache);
     }
 
+    @FunctionalInterface
+    private interface LineEndParser {
+        void parse(CharSequenceCache cache);
+    }
+
     private static class CacheEntry {
-        private TableWriter writer;
         private int state = 0;
+        private TableWriter writer;
     }
 
     private class TableStructureAdapter implements TableStructure {
@@ -537,10 +580,10 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
                 return "timestamp";
             }
             CharSequence colName = cache.get(columnNameType.getQuick(columnIndex * 2));
-            if (TableUtils.isValidColumnName(colName)) {
+            if (TableUtils.isValidColumnName(colName, configuration.getMaxFileNameLength())) {
                 return colName;
             }
-            throw CairoException.instance(0).put("column name contains invalid characters [colName=").put(colName).put(']');
+            throw CairoException.nonCritical().put("column name contains invalid characters [colName=").put(colName).put(']');
         }
 
         @Override
@@ -552,23 +595,24 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         }
 
         @Override
-        public long getColumnHash(int columnIndex) {
-            return configuration.getRandom().nextLong();
-        }
-
-        @Override
         public int getIndexBlockCapacity(int columnIndex) {
             return 0;
         }
 
         @Override
-        public boolean isIndexed(int columnIndex) {
-            return false;
+        public int getMaxUncommittedRows() {
+            return configuration.getMaxUncommittedRows();
         }
 
         @Override
-        public boolean isSequential(int columnIndex) {
-            return false;
+        public long getMetadataVersion() {
+            // new table only
+            return 0;
+        }
+
+        @Override
+        public long getO3MaxLag() {
+            return configuration.getO3MaxLag();
         }
 
         @Override
@@ -597,13 +641,18 @@ public class LineUdpParserImpl implements LineUdpParser, Closeable {
         }
 
         @Override
-        public int getMaxUncommittedRows() {
-            return configuration.getMaxUncommittedRows();
+        public boolean isDedupKey(int columnIndex) {
+            return false;
         }
 
         @Override
-        public long getCommitLag() {
-            return configuration.getCommitLag();
+        public boolean isIndexed(int columnIndex) {
+            return false;
+        }
+
+        @Override
+        public boolean isWalEnabled() {
+            return configuration.getWalEnabledDefault() && PartitionBy.isPartitioned(getPartitionBy());
         }
 
         TableStructureAdapter of(CharSequenceCache cache) {

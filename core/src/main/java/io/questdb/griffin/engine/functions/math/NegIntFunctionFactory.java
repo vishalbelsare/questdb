@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.IntFunction;
 import io.questdb.griffin.engine.functions.UnaryFunction;
@@ -67,7 +68,18 @@ public class NegIntFunctionFactory implements FunctionFactory {
         @Override
         public int getInt(Record rec) {
             final int value = arg.getInt(rec);
-            return value != Numbers.INT_NaN ? -value : Numbers.INT_NaN;
+            return value != Numbers.INT_NULL ? -value : Numbers.INT_NULL;
+        }
+
+        @Override
+        public long getLong(Record rec) {
+            final int value = arg.getInt(rec);
+            return value != Numbers.INT_NULL ? -((long) value) : Numbers.LONG_NULL;
+        }
+
+        @Override
+        public void toPlan(PlanSink sink) {
+            sink.val('-').val(arg);
         }
     }
 }

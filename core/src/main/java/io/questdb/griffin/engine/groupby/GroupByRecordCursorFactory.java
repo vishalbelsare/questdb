@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,95 +24,112 @@
 
 package io.questdb.griffin.engine.groupby;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.AbstractRecordCursorFactory;
+import io.questdb.cairo.ArrayColumnTypes;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.ListColumnFilter;
+import io.questdb.cairo.RecordSink;
+import io.questdb.cairo.RecordSinkFactory;
 import io.questdb.cairo.map.Map;
 import io.questdb.cairo.map.MapFactory;
 import io.questdb.cairo.map.MapKey;
+import io.questdb.cairo.map.MapRecordCursor;
 import io.questdb.cairo.map.MapValue;
-import io.questdb.cairo.sql.*;
+import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.RecordCursor;
+import io.questdb.cairo.sql.RecordCursorFactory;
+import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.cairo.sql.SqlExecutionCircuitBreaker;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.std.BytecodeAssembler;
+import io.questdb.std.DirectLongLongHeap;
 import io.questdb.std.Misc;
 import io.questdb.std.ObjList;
 import io.questdb.std.Transient;
 import org.jetbrains.annotations.NotNull;
 
-public class GroupByRecordCursorFactory implements RecordCursorFactory {
-
-    protected final RecordCursorFactory base;
-    private final Map dataMap;
-    private final VirtualFunctionSkewedSymbolRecordCursor cursor;
-    private final ObjList<Function> recordFunctions;
+public class GroupByRecordCursorFactory extends AbstractRecordCursorFactory {
+    private final RecordCursorFactory base;
+    private final GroupByRecordCursor cursor;
     private final ObjList<GroupByFunction> groupByFunctions;
-    private final RecordSink mapSink;
+    private final ObjList<Function> keyFunctions;
     // this sink is used to copy recordKeyMap keys to dataMap
-    private final RecordMetadata metadata;
+    private final RecordSink mapSink;
+    private final ObjList<Function> recordFunctions;
 
     public GroupByRecordCursorFactory(
+            @Transient @NotNull BytecodeAssembler asm,
             CairoConfiguration configuration,
             RecordCursorFactory base,
             @Transient @NotNull ListColumnFilter listColumnFilter,
-            @Transient @NotNull BytecodeAssembler asm,
             @Transient @NotNull ArrayColumnTypes keyTypes,
             @Transient @NotNull ArrayColumnTypes valueTypes,
             RecordMetadata groupByMetadata,
             ObjList<GroupByFunction> groupByFunctions,
+            ObjList<Function> keyFunctions,
             ObjList<Function> recordFunctions
     ) {
-        // sink will be storing record columns to map key
+        super(groupByMetadata);
         try {
-            this.dataMap = MapFactory.createMap(configuration, keyTypes, valueTypes);
-            this.mapSink = RecordSinkFactory.getInstance(asm, base.getMetadata(), listColumnFilter, false);
             this.base = base;
-            this.metadata = groupByMetadata;
             this.groupByFunctions = groupByFunctions;
+            this.keyFunctions = keyFunctions;
             this.recordFunctions = recordFunctions;
-            this.cursor = new VirtualFunctionSkewedSymbolRecordCursor(recordFunctions);
+            // sink will be storing record columns to map key
+            this.mapSink = RecordSinkFactory.getInstance(asm, base.getMetadata(), listColumnFilter, keyFunctions, null);
+            final GroupByFunctionsUpdater updater = GroupByFunctionsUpdaterFactory.getInstance(asm, groupByFunctions);
+            this.cursor = new GroupByRecordCursor(configuration, recordFunctions, groupByFunctions, updater, keyTypes, valueTypes);
         } catch (Throwable e) {
-            Misc.freeObjList(recordFunctions);
+            close();
             throw e;
         }
     }
 
+    public static ObjList<String> getKeys(ObjList<Function> recordFunctions, RecordMetadata metadata) {
+        ObjList<String> keyFuncs = null;
+        for (int i = 0, n = recordFunctions.size(); i < n; i++) {
+            if (!(recordFunctions.get(i) instanceof GroupByFunction)) {
+                if (keyFuncs == null) {
+                    keyFuncs = new ObjList<>();
+                }
+                keyFuncs.add(metadata.getColumnName(i));
+            }
+        }
+        return keyFuncs;
+    }
+
     @Override
-    public void close() {
-        Misc.freeObjList(recordFunctions);
-        Misc.free(dataMap);
-        Misc.free(base);
+    public RecordCursorFactory getBaseFactory() {
+        return base;
     }
 
     @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        dataMap.clear();
-        final SqlExecutionCircuitBreaker circuitBreaker = executionContext.getCircuitBreaker();
         final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            // init all record functions for this cursor, in case functions require metadata and/or symbol tables
+            Function.init(recordFunctions, baseCursor, executionContext);
+        } catch (Throwable th) {
+            baseCursor.close();
+            throw th;
+        }
 
         try {
-            Function.init(recordFunctions, baseCursor, executionContext);
-            final Record baseRecord = baseCursor.getRecord();
-            final int n = groupByFunctions.size();
-            while (baseCursor.hasNext()) {
-                circuitBreaker.statefulThrowExceptionIfTripped();
-                final MapKey key = dataMap.withKey();
-                mapSink.copy(baseRecord, key);
-                MapValue value = key.createValue();
-                GroupByUtils.updateFunctions(groupByFunctions, n, value, baseRecord);
-            }
-            cursor.of(baseCursor, dataMap.getCursor());
-            // init all record function for this cursor, in case functions require metadata and/or symbol tables
+            cursor.of(baseCursor, executionContext);
             return cursor;
-        } catch (Throwable e) {
-            baseCursor.close();
-            throw e;
+        } catch (Throwable th) {
+            cursor.close();
+            throw th;
         }
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return metadata;
+    public boolean recordCursorSupportsLongTopK() {
+        return true;
     }
 
     @Override
@@ -121,7 +138,131 @@ public class GroupByRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("GroupBy");
+        sink.meta("vectorized").val(false);
+        sink.optAttr("keys", getKeys(recordFunctions, getMetadata()));
+        sink.optAttr("values", groupByFunctions, true);
+        sink.child(base);
+    }
+
+    @Override
     public boolean usesCompiledFilter() {
         return base.usesCompiledFilter();
+    }
+
+    @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
+
+    @Override
+    protected void _close() {
+        Misc.freeObjList(recordFunctions); // groupByFunctions are included in recordFunctions
+        Misc.freeObjList(keyFunctions);
+        Misc.free(base);
+        Misc.free(cursor);
+    }
+
+    private class GroupByRecordCursor extends VirtualFunctionSkewedSymbolRecordCursor {
+        private final GroupByAllocator allocator;
+        private final Map dataMap;
+        private final GroupByFunctionsUpdater groupByFunctionsUpdater;
+        private SqlExecutionCircuitBreaker circuitBreaker;
+        private boolean isDataMapBuilt;
+        private boolean isOpen;
+        private long rowId;
+
+        public GroupByRecordCursor(
+                CairoConfiguration configuration,
+                ObjList<Function> functions,
+                ObjList<GroupByFunction> groupByFunctions,
+                GroupByFunctionsUpdater groupByFunctionsUpdater,
+                @Transient @NotNull ArrayColumnTypes keyTypes,
+                @Transient @NotNull ArrayColumnTypes valueTypes
+        ) {
+            super(functions);
+            try {
+                this.isOpen = true;
+                this.dataMap = MapFactory.createUnorderedMap(configuration, keyTypes, valueTypes);
+                this.groupByFunctionsUpdater = groupByFunctionsUpdater;
+                this.allocator = GroupByAllocatorFactory.createAllocator(configuration);
+                GroupByUtils.setAllocator(groupByFunctions, allocator);
+            } catch (Throwable th) {
+                close();
+                throw th;
+            }
+        }
+
+        @Override
+        public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, Counter counter) {
+            if (!isDataMapBuilt) {
+                buildDataMap();
+            }
+            baseCursor.calculateSize(circuitBreaker, counter);
+        }
+
+        @Override
+        public void close() {
+            if (isOpen) {
+                isOpen = false;
+                Misc.free(dataMap);
+                Misc.free(allocator);
+                Misc.clearObjList(groupByFunctions);
+                super.close();
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (!isDataMapBuilt) {
+                buildDataMap();
+            }
+            return super.hasNext();
+        }
+
+        @Override
+        public void longTopK(DirectLongLongHeap heap, int columnIndex) {
+            if (!isDataMapBuilt) {
+                buildDataMap();
+            }
+            ((MapRecordCursor) baseCursor).longTopK(heap, recordFunctions.getQuick(columnIndex));
+        }
+
+        public void of(RecordCursor managedCursor, SqlExecutionContext executionContext) throws SqlException {
+            this.managedCursor = managedCursor;
+            if (!isOpen) {
+                isOpen = true;
+                dataMap.reopen();
+            }
+            this.circuitBreaker = executionContext.getCircuitBreaker();
+            Function.init(keyFunctions, managedCursor, executionContext);
+            isDataMapBuilt = false;
+            rowId = 0;
+        }
+
+        @Override
+        public void toTop() {
+            super.toTop();
+            isDataMapBuilt = false;
+            rowId = 0;
+        }
+
+        private void buildDataMap() {
+            final Record baseRecord = managedCursor.getRecord();
+            while (managedCursor.hasNext()) {
+                circuitBreaker.statefulThrowExceptionIfTripped();
+                final MapKey key = dataMap.withKey();
+                mapSink.copy(baseRecord, key);
+                MapValue value = key.createValue();
+                if (value.isNew()) {
+                    groupByFunctionsUpdater.updateNew(value, baseRecord, rowId++);
+                } else {
+                    groupByFunctionsUpdater.updateExisting(value, baseRecord, rowId++);
+                }
+            }
+            super.of(dataMap.getCursor());
+            isDataMapBuilt = true;
+        }
     }
 }

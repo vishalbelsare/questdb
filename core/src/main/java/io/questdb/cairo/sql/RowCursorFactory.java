@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,33 +24,47 @@
 
 package io.questdb.cairo.sql;
 
-import io.questdb.cairo.TableReader;
+import io.questdb.griffin.Plannable;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.ObjList;
 
-public interface RowCursorFactory {
-    static void prepareCursor(
+public interface RowCursorFactory extends Plannable {
+
+    static void init(
             ObjList<? extends RowCursorFactory> factories,
-            TableReader tableReader,
+            PageFrameCursor pageFrameCursor,
             SqlExecutionContext sqlExecutionContext
     ) throws SqlException {
         for (int i = 0, n = factories.size(); i < n; i++) {
-            factories.getQuick(i).prepareCursor(tableReader, sqlExecutionContext);
+            factories.getQuick(i).init(pageFrameCursor, sqlExecutionContext);
         }
     }
 
-    RowCursor getCursor(DataFrame dataFrame);
+    static void prepareCursor(ObjList<? extends RowCursorFactory> factories, PageFrameCursor pageFrameCursor) {
+        for (int i = 0, n = factories.size(); i < n; i++) {
+            factories.getQuick(i).prepareCursor(pageFrameCursor);
+        }
+    }
 
-    default void prepareCursor(TableReader tableReader, SqlExecutionContext sqlExecutionContext) throws SqlException {
+    RowCursor getCursor(PageFrame pageFrame, PageFrameMemory pageFrameMemory);
+
+    default void init(PageFrameCursor pageFrameCursor, SqlExecutionContext sqlExecutionContext) throws SqlException {
+        // no-op
     }
 
     boolean isEntity();
 
     /**
-     * Returns true if the returned RowCursor is using an index, false otherwise
+     * Indicates if the factory uses index
+     *
+     * @return true if the returned RowCursor is using an index, false otherwise
      */
     default boolean isUsingIndex() {
         return false;
+    }
+
+    default void prepareCursor(PageFrameCursor pageFrameCursor) {
+        // no-op
     }
 }

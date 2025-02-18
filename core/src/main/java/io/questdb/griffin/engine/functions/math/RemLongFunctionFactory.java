@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -61,23 +61,33 @@ public class RemLongFunctionFactory implements FunctionFactory {
         }
 
         @Override
+        public long getLong(Record rec) {
+            final long r = right.getLong(rec);
+            if (r == 0 || r == Numbers.LONG_NULL) {
+                return Numbers.LONG_NULL;
+            }
+
+            final long l = left.getLong(rec);
+            if (l == Numbers.LONG_NULL) {
+                return Numbers.LONG_NULL;
+            }
+
+            return l % r;
+        }
+
+        @Override
+        public String getName() {
+            return "%";
+        }
+
+        @Override
         public Function getRight() {
             return right;
         }
 
         @Override
-        public long getLong(Record rec) {
-            final long r = right.getLong(rec);
-            if (r == 0 || r == Numbers.LONG_NaN) {
-                return Numbers.LONG_NaN;
-            }
-
-            final long l = left.getLong(rec);
-            if (l == Numbers.LONG_NaN) {
-                return Numbers.LONG_NaN;
-            }
-
-            return l % r;
+        public boolean isOperator() {
+            return true;
         }
     }
 }

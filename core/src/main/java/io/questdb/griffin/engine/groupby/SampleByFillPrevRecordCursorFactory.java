@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import io.questdb.cairo.ListColumnFilter;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.std.BytecodeAssembler;
 import io.questdb.std.ObjList;
@@ -37,14 +38,14 @@ import io.questdb.std.Transient;
 import org.jetbrains.annotations.NotNull;
 
 public class SampleByFillPrevRecordCursorFactory extends AbstractSampleByFillRecordCursorFactory {
-    private final AbstractNoRecordSampleByCursor cursor;
+    private final SampleByFillPrevRecordCursor cursor;
 
     public SampleByFillPrevRecordCursorFactory(
+            @Transient @NotNull BytecodeAssembler asm,
             CairoConfiguration configuration,
             RecordCursorFactory base,
             @NotNull TimestampSampler timestampSampler,
             @Transient @NotNull ListColumnFilter listColumnFilter,
-            @Transient @NotNull BytecodeAssembler asm,
             @Transient @NotNull ArrayColumnTypes keyTypes,
             @Transient @NotNull ArrayColumnTypes valueTypes,
             RecordMetadata groupByMetadata,
@@ -54,31 +55,51 @@ public class SampleByFillPrevRecordCursorFactory extends AbstractSampleByFillRec
             Function timezoneNameFunc,
             int timezoneNameFuncPos,
             Function offsetFunc,
-            int offsetFuncPos
+            int offsetFuncPos,
+            Function sampleFromFunc,
+            int sampleFromFuncPos,
+            Function sampleToFunc,
+            int sampleToFuncPos
     ) {
         super(
+                asm,
                 configuration,
                 base,
                 listColumnFilter,
-                asm,
                 keyTypes,
                 valueTypes,
                 groupByMetadata,
                 groupByFunctions,
                 recordFunctions
         );
-        this.cursor = new SampleByFillPrevRecordCursor(
+        final GroupByFunctionsUpdater updater = GroupByFunctionsUpdaterFactory.getInstance(asm, groupByFunctions);
+        cursor = new SampleByFillPrevRecordCursor(
+                configuration,
                 map,
                 mapSink,
                 groupByFunctions,
+                updater,
                 recordFunctions,
                 timestampIndex,
                 timestampSampler,
                 timezoneNameFunc,
                 timezoneNameFuncPos,
                 offsetFunc,
-                offsetFuncPos
+                offsetFuncPos,
+                sampleFromFunc,
+                sampleFromFuncPos,
+                sampleToFunc,
+                sampleToFuncPos
         );
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Sample By");
+        sink.attr("fill").val("prev");
+        sink.optAttr("keys", GroupByRecordCursorFactory.getKeys(recordFunctions, getMetadata()));
+        sink.optAttr("values", groupByFunctions, true);
+        sink.child(base);
     }
 
     @Override

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,17 +24,17 @@
 
 package io.questdb.griffin.engine.table;
 
+import io.questdb.cairo.BitmapIndexReader;
 import io.questdb.cairo.TableUtils;
-import io.questdb.cairo.sql.DataFrame;
-import io.questdb.cairo.sql.Function;
-import io.questdb.cairo.sql.RowCursor;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 
 public class SymbolIndexRowCursorFactory implements SymbolFunctionRowCursorFactory {
-    private final int columnIndex;
-    private int symbolKey;
     private final boolean cachedIndexReaderCursor;
+    private final int columnIndex;
     private final int indexDirection;
     private final Function symbolFunction;
+    private int symbolKey;
 
     public SymbolIndexRowCursorFactory(
             int columnIndex,
@@ -51,15 +51,19 @@ public class SymbolIndexRowCursorFactory implements SymbolFunctionRowCursorFacto
     }
 
     @Override
-    public void of(int symbolKey) {
-        this.symbolKey = TableUtils.toIndexKey(symbolKey);
+    public RowCursor getCursor(PageFrame pageFrame, PageFrameMemory pageFrameMemory) {
+        return pageFrame
+                .getBitmapIndexReader(columnIndex, indexDirection)
+                .getCursor(cachedIndexReaderCursor, symbolKey, pageFrame.getPartitionLo(), pageFrame.getPartitionHi() - 1);
     }
 
     @Override
-    public RowCursor getCursor(DataFrame dataFrame) {
-        return dataFrame
-                .getBitmapIndexReader(columnIndex, indexDirection)
-                .getCursor(cachedIndexReaderCursor, symbolKey, dataFrame.getRowLo(), dataFrame.getRowHi() - 1);
+    public Function getFunction() {
+        return symbolFunction;
+    }
+
+    public int getSymbolKey() {
+        return symbolKey == 0 ? SymbolTable.VALUE_IS_NULL : symbolKey - 1;
     }
 
     @Override
@@ -73,7 +77,13 @@ public class SymbolIndexRowCursorFactory implements SymbolFunctionRowCursorFacto
     }
 
     @Override
-    public Function getFunction() {
-        return symbolFunction;
+    public void of(int symbolKey) {
+        this.symbolKey = TableUtils.toIndexKey(symbolKey);
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Index ").type(BitmapIndexReader.nameOf(indexDirection)).type(" scan").meta("on").putBaseColumnName(columnIndex);
+        sink.attr("filter").putBaseColumnName(columnIndex).val('=').val(symbolKey);
     }
 }

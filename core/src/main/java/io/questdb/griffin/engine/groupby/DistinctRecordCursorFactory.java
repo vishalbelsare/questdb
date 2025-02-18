@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,15 +24,13 @@
 
 package io.questdb.griffin.engine.groupby;
 
-import io.questdb.cairo.CairoConfiguration;
-import io.questdb.cairo.EntityColumnFilter;
-import io.questdb.cairo.RecordSink;
-import io.questdb.cairo.RecordSinkFactory;
+import io.questdb.cairo.*;
 import io.questdb.cairo.map.Map;
 import io.questdb.cairo.map.MapFactory;
 import io.questdb.cairo.map.MapKey;
-import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.BytecodeAssembler;
@@ -40,14 +38,12 @@ import io.questdb.std.Misc;
 import io.questdb.std.Transient;
 import org.jetbrains.annotations.NotNull;
 
-public class DistinctRecordCursorFactory implements RecordCursorFactory {
+public class DistinctRecordCursorFactory extends AbstractRecordCursorFactory {
 
     private final RecordCursorFactory base;
-    private final Map dataMap;
     private final DistinctRecordCursor cursor;
     // this sink is used to copy recordKeyMap keys to dataMap
     private final RecordSink mapSink;
-    private final RecordMetadata metadata;
 
     public DistinctRecordCursorFactory(
             CairoConfiguration configuration,
@@ -55,38 +51,35 @@ public class DistinctRecordCursorFactory implements RecordCursorFactory {
             @Transient @NotNull EntityColumnFilter columnFilter,
             @Transient @NotNull BytecodeAssembler asm
     ) {
-        final RecordMetadata metadata = base.getMetadata();
-        // sink will be storing record columns to map key
-        columnFilter.of(metadata.getColumnCount());
-        this.mapSink = RecordSinkFactory.getInstance(asm, metadata, columnFilter, false);
-        this.dataMap = MapFactory.createMap(configuration, metadata);
+        super(base.getMetadata());
         this.base = base;
-        this.metadata = metadata;
-        this.cursor = new DistinctRecordCursor();
-    }
-
-    @Override
-    public void close() {
-        dataMap.close();
-        base.close();
-    }
-
-    @Override
-    public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        dataMap.clear();
-        final RecordCursor baseCursor = base.getCursor(executionContext);
         try {
-            cursor.of(baseCursor, dataMap, mapSink, executionContext.getCircuitBreaker());
-            return cursor;
-        } catch (Throwable e) {
-            baseCursor.close();
-            throw e;
+            final RecordMetadata metadata = base.getMetadata();
+            // sink will be storing record columns to map key
+            columnFilter.of(metadata.getColumnCount());
+            mapSink = RecordSinkFactory.getInstance(asm, metadata, columnFilter);
+            cursor = new DistinctRecordCursor(configuration, metadata);
+        } catch (Throwable th) {
+            close();
+            throw th;
         }
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return metadata;
+    public RecordCursorFactory getBaseFactory() {
+        return base;
+    }
+
+    @Override
+    public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            cursor.of(baseCursor, mapSink, executionContext.getCircuitBreaker());
+            return cursor;
+        } catch (Throwable e) {
+            cursor.close();
+            throw e;
+        }
     }
 
     @Override
@@ -95,24 +88,48 @@ public class DistinctRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Distinct");
+        sink.attr("keys").val(getMetadata());
+        sink.child(base);
+    }
+
+    @Override
     public boolean usesCompiledFilter() {
         return base.usesCompiledFilter();
     }
 
-    private static class DistinctRecordCursor implements RecordCursor {
-        private RecordCursor baseCursor;
-        private Map dataMap;
-        private RecordSink recordSink;
-        private Record record;
-        private SqlExecutionCircuitBreaker circuitBreaker;
+    @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
 
-        public DistinctRecordCursor() {
+    @Override
+    protected void _close() {
+        Misc.free(base);
+        Misc.free(cursor);
+    }
+
+    private static class DistinctRecordCursor implements RecordCursor {
+        private final Map dataMap;
+        private RecordCursor baseCursor;
+        private SqlExecutionCircuitBreaker circuitBreaker;
+        private boolean isOpen;
+        private Record record;
+        private RecordSink recordSink;
+
+        public DistinctRecordCursor(CairoConfiguration configuration, RecordMetadata metadata) {
+            this.isOpen = true;
+            this.dataMap = MapFactory.createOrderedMap(configuration, metadata);
         }
 
         @Override
         public void close() {
-            Misc.free(baseCursor);
-            dataMap.restoreInitialCapacity();
+            if (isOpen) {
+                isOpen = false;
+                Misc.free(baseCursor);
+                Misc.free(dataMap);
+            }
         }
 
         @Override
@@ -121,13 +138,13 @@ public class DistinctRecordCursorFactory implements RecordCursorFactory {
         }
 
         @Override
-        public SymbolTable getSymbolTable(int columnIndex) {
-            return baseCursor.getSymbolTable(columnIndex);
+        public Record getRecordB() {
+            return baseCursor.getRecordB();
         }
 
         @Override
-        public SymbolTable newSymbolTable(int columnIndex) {
-            return baseCursor.newSymbolTable(columnIndex);
+        public SymbolTable getSymbolTable(int columnIndex) {
+            return baseCursor.getSymbolTable(columnIndex);
         }
 
         @Override
@@ -144,8 +161,19 @@ public class DistinctRecordCursorFactory implements RecordCursorFactory {
         }
 
         @Override
-        public Record getRecordB() {
-            return baseCursor.getRecordB();
+        public SymbolTable newSymbolTable(int columnIndex) {
+            return baseCursor.newSymbolTable(columnIndex);
+        }
+
+        public void of(RecordCursor baseCursor, RecordSink recordSink, SqlExecutionCircuitBreaker circuitBreaker) {
+            this.baseCursor = baseCursor;
+            record = baseCursor.getRecord();
+            if (!isOpen) {
+                isOpen = true;
+                dataMap.reopen();
+            }
+            this.recordSink = recordSink;
+            this.circuitBreaker = circuitBreaker;
         }
 
         @Override
@@ -154,22 +182,14 @@ public class DistinctRecordCursorFactory implements RecordCursorFactory {
         }
 
         @Override
-        public void toTop() {
-            baseCursor.toTop();
-            dataMap.clear();
-        }
-
-        public void of(RecordCursor baseCursor, Map dataMap, RecordSink recordSink, SqlExecutionCircuitBreaker circuitBreaker) {
-            this.baseCursor = baseCursor;
-            this.dataMap = dataMap;
-            this.recordSink = recordSink;
-            this.record = baseCursor.getRecord();
-            this.circuitBreaker = circuitBreaker;
+        public long size() {
+            return -1;
         }
 
         @Override
-        public long size() {
-            return -1;
+        public void toTop() {
+            baseCursor.toTop();
+            dataMap.clear();
         }
     }
 }

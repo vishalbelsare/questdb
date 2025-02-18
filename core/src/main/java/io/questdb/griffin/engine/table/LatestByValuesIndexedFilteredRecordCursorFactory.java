@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,48 +26,77 @@ package io.questdb.griffin.engine.table;
 
 import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.SymbolMapReader;
-import io.questdb.cairo.sql.DataFrameCursorFactory;
 import io.questdb.cairo.sql.Function;
+import io.questdb.cairo.sql.PartitionFrameCursorFactory;
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.std.IntList;
+import io.questdb.std.Misc;
 import io.questdb.std.ObjList;
 import io.questdb.std.Transient;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 public class LatestByValuesIndexedFilteredRecordCursorFactory extends AbstractDeferredTreeSetRecordCursorFactory {
-
     private final Function filter;
 
     public LatestByValuesIndexedFilteredRecordCursorFactory(
             @NotNull CairoConfiguration configuration,
             @NotNull RecordMetadata metadata,
-            @NotNull DataFrameCursorFactory dataFrameCursorFactory,
+            @NotNull PartitionFrameCursorFactory partitionFrameCursorFactory,
             int columnIndex,
             @Transient ObjList<Function> keyValueFuncs,
             @Transient SymbolMapReader symbolMapReader,
             @Nullable Function filter,
-            @NotNull IntList columnIndexes
+            @NotNull IntList columnIndexes,
+            @NotNull IntList columnSizeShifts
     ) {
-        super(configuration, metadata, dataFrameCursorFactory, columnIndex, keyValueFuncs, symbolMapReader);
-        if (filter != null) {
-            this.cursor = new LatestByValuesIndexedFilteredRecordCursor(columnIndex, rows, symbolKeys, deferredSymbolKeys, filter, columnIndexes);
-        } else {
-            this.cursor = new LatestByValuesIndexedRecordCursor(columnIndex, symbolKeys, deferredSymbolKeys, rows, columnIndexes);
-        }
-        this.filter = filter;
-    }
+        super(configuration, metadata, partitionFrameCursorFactory, columnIndex, keyValueFuncs, symbolMapReader, columnIndexes, columnSizeShifts);
 
-    @Override
-    public void close() {
-        super.close();
-        if (filter != null) {
-            filter.close();
+        try {
+            if (filter != null) {
+                cursor = new LatestByValuesIndexedFilteredRecordCursor(configuration, metadata, columnIndex, rows, symbolKeys, deferredSymbolKeys, filter);
+            } else {
+                cursor = new LatestByValuesIndexedRecordCursor(configuration, metadata, columnIndex, symbolKeys, deferredSymbolKeys, rows);
+            }
+            this.filter = filter;
+        } catch (Throwable th) {
+            close();
+            throw th;
         }
     }
 
     @Override
     public boolean recordCursorSupportsRandomAccess() {
         return true;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Index backward scan").meta("on").putColumnName(columnIndex);
+        sink.optAttr("filter", filter);
+        sink.attr("symbolFilter").putColumnName(columnIndex).val(" in ");
+        if (symbolKeys.size() > 0) {
+            sink.val(symbolKeys);
+        }
+        if (deferredSymbolFuncs != null && deferredSymbolFuncs.size() > 0) {
+            if (symbolKeys.size() > 0) {
+                sink.val(" or ").putColumnName(columnIndex).val(" in ");
+            }
+            sink.val(deferredSymbolFuncs);
+        }
+        sink.child(partitionFrameCursorFactory);
+    }
+
+    @Override
+    public boolean usesIndex() {
+        return true;
+    }
+
+    @Override
+    protected void _close() {
+        super._close();
+        Misc.free(filter);
+        Misc.free(cursor);
     }
 }

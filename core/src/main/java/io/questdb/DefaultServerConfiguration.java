@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,8 +26,9 @@ package io.questdb;
 
 import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.DefaultCairoConfiguration;
+import io.questdb.cairo.wal.DefaultWalApplyWorkerPoolConfiguration;
 import io.questdb.cutlass.http.DefaultHttpServerConfiguration;
-import io.questdb.cutlass.http.HttpMinServerConfiguration;
+import io.questdb.cutlass.http.HttpFullFatServerConfiguration;
 import io.questdb.cutlass.http.HttpServerConfiguration;
 import io.questdb.cutlass.line.tcp.DefaultLineTcpReceiverConfiguration;
 import io.questdb.cutlass.line.tcp.LineTcpReceiverConfiguration;
@@ -42,13 +43,20 @@ import io.questdb.mp.WorkerPoolConfiguration;
 public class DefaultServerConfiguration implements ServerConfiguration {
     private final DefaultCairoConfiguration cairoConfiguration;
     private final DefaultHttpServerConfiguration httpServerConfiguration = new DefaultHttpServerConfiguration();
-    private final DefaultLineUdpReceiverConfiguration lineUdpReceiverConfiguration = new DefaultLineUdpReceiverConfiguration();
     private final DefaultLineTcpReceiverConfiguration lineTcpReceiverConfiguration = new DefaultLineTcpReceiverConfiguration();
-    private final DefaultPGWireConfiguration pgWireConfiguration = new DefaultPGWireConfiguration();
+    private final DefaultLineUdpReceiverConfiguration lineUdpReceiverConfiguration = new DefaultLineUdpReceiverConfiguration();
+    private final DefaultMemoryConfiguration memoryConfiguration = new DefaultMemoryConfiguration();
     private final DefaultMetricsConfiguration metricsConfiguration = new DefaultMetricsConfiguration();
+    private final DefaultPGWireConfiguration pgWireConfiguration = new DefaultPGWireConfiguration();
+    private final PublicPassthroughConfiguration publicPassthroughConfiguration = new DefaultPublicPassthroughConfiguration();
+    private final WorkerPoolConfiguration walApplyPoolConfiguration = new DefaultWalApplyWorkerPoolConfiguration();
 
-    public DefaultServerConfiguration(CharSequence root) {
-        this.cairoConfiguration = new DefaultCairoConfiguration(root);
+    public DefaultServerConfiguration(CharSequence dbRoot, CharSequence installRoot) {
+        this.cairoConfiguration = new DefaultCairoConfiguration(dbRoot, installRoot);
+    }
+
+    public DefaultServerConfiguration(CharSequence dbRoot) {
+        this.cairoConfiguration = new DefaultCairoConfiguration(dbRoot);
     }
 
     @Override
@@ -57,18 +65,18 @@ public class DefaultServerConfiguration implements ServerConfiguration {
     }
 
     @Override
-    public HttpServerConfiguration getHttpServerConfiguration() {
-        return httpServerConfiguration;
+    public FactoryProvider getFactoryProvider() {
+        return DefaultFactoryProvider.INSTANCE;
     }
 
     @Override
-    public HttpMinServerConfiguration getHttpMinServerConfiguration() {
+    public HttpServerConfiguration getHttpMinServerConfiguration() {
         return null;
     }
 
     @Override
-    public LineUdpReceiverConfiguration getLineUdpReceiverConfiguration() {
-        return lineUdpReceiverConfiguration;
+    public HttpFullFatServerConfiguration getHttpServerConfiguration() {
+        return httpServerConfiguration;
     }
 
     @Override
@@ -77,8 +85,23 @@ public class DefaultServerConfiguration implements ServerConfiguration {
     }
 
     @Override
-    public WorkerPoolConfiguration getWorkerPoolConfiguration() {
-        return httpServerConfiguration;
+    public LineUdpReceiverConfiguration getLineUdpReceiverConfiguration() {
+        return lineUdpReceiverConfiguration;
+    }
+
+    @Override
+    public MemoryConfiguration getMemoryConfiguration() {
+        return memoryConfiguration;
+    }
+
+    @Override
+    public Metrics getMetrics() {
+        return Metrics.ENABLED;
+    }
+
+    @Override
+    public MetricsConfiguration getMetricsConfiguration() {
+        return metricsConfiguration;
     }
 
     @Override
@@ -87,7 +110,17 @@ public class DefaultServerConfiguration implements ServerConfiguration {
     }
 
     @Override
-    public MetricsConfiguration getMetricsConfiguration() {
-        return metricsConfiguration;
+    public PublicPassthroughConfiguration getPublicPassthroughConfiguration() {
+        return publicPassthroughConfiguration;
+    }
+
+    @Override
+    public WorkerPoolConfiguration getWalApplyPoolConfiguration() {
+        return walApplyPoolConfiguration;
+    }
+
+    @Override
+    public WorkerPoolConfiguration getWorkerPoolConfiguration() {
+        return httpServerConfiguration;
     }
 }

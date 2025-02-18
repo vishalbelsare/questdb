@@ -17,7 +17,7 @@ stages:
         strategy:
           matrix:
             linux:
-              imageName: "ubuntu-latest"
+              imageName: "ubuntu-20.04"
               poolName: "Azure Pipelines"
               os: Linux
               jdk: "1.11"
@@ -44,6 +44,7 @@ stages:
 
           - bash: |
               echo "##vso[task.setvariable variable=OS_MAPPING]$(Linux-X64)"
+              sudo apt-get update -y
               sudo apt-get install -y nasm g++-10-aarch64-linux-gnu gcc-10-aarch64-linux-gnu gcc-mingw-w64 g++-mingw-w64
             condition:
               and(eq(variables['Agent.OS'], 'Linux'),
@@ -74,6 +75,7 @@ stages:
               workingDirectory: core
               cmakeArgs:
                 -DCMAKE_TOOLCHAIN_FILE=./src/main/c/toolchains/linux-arm64.cmake
+                -DARM_TOOLCHAIN_PATH=/usr/bin/
                 -DCMAKE_EXECUTABLE_SUFFIX=-10 -DCMAKE_CROSSCOMPILING=True
                 -DCMAKE_BUILD_TYPE=Release -B cmake-build-release-arm64
             displayName: "CMAKE Linux arm"

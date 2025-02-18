@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,65 +24,52 @@
 
 package io.questdb.cutlass.line;
 
-import io.questdb.cairo.CairoException;
-import io.questdb.log.Log;
-import io.questdb.network.NetworkError;
-import io.questdb.network.NetworkFacade;
-import io.questdb.network.NetworkFacadeImpl;
-import io.questdb.std.Chars;
+import io.questdb.cairo.TableUtils;
+import io.questdb.client.Sender;
+import io.questdb.cutlass.auth.AuthUtils;
 import io.questdb.std.MemoryTag;
+import io.questdb.std.Misc;
+import io.questdb.std.Numbers;
 import io.questdb.std.Unsafe;
 import io.questdb.std.Vect;
-import io.questdb.std.str.AbstractCharSink;
-import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
+import io.questdb.std.str.Utf8Sink;
+import io.questdb.std.str.Utf8s;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.Closeable;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.SignatureException;
+import java.time.temporal.ChronoUnit;
+import java.util.Base64;
 
-public abstract class AbstractLineSender extends AbstractCharSink implements Closeable {
+public abstract class AbstractLineSender implements Utf8Sink, Closeable, Sender {
     protected final int capacity;
-    protected final long fd;
-    protected final NetworkFacade nf;
     private final long bufA;
     private final long bufB;
-    private final long sockaddr;
+    protected LineChannel lineChannel;
+    private boolean closed;
+    private boolean enableValidation;
+    private boolean hasColumns;
+    private boolean hasSymbols;
+    private boolean hasTable;
+    private long hi;
+    private long lineStart;
+    private long lo;
+    private long ptr;
     private boolean quoted = false;
 
-    private long lo;
-    private long hi;
-    private long ptr;
-    private long lineStart;
-    private boolean hasMetric = false;
-    private boolean noFields = true;
-    private final Log log;
-
-    public AbstractLineSender(
-            int interfaceIPv4Address,
-            int sendToIPv4Address,
-            int sendToPort,
-            int bufferCapacity,
-            int ttl,
-            Log log
-    ) {
-        this(NetworkFacadeImpl.INSTANCE, interfaceIPv4Address, sendToIPv4Address, sendToPort, bufferCapacity, ttl, log);
-    }
-
-    public AbstractLineSender(
-            NetworkFacade nf,
-            int interfaceIPv4Address,
-            int sendToIPv4Address,
-            int sendToPort,
-            int capacity,
-            int ttl,
-            Log log
-    ) {
-        this.nf = nf;
+    public AbstractLineSender(LineChannel lineChannel, int capacity) {
+        this.lineChannel = lineChannel;
         this.capacity = capacity;
-        this.log = log;
-        sockaddr = nf.sockaddr(sendToIPv4Address, sendToPort);
-        fd = createSocket(interfaceIPv4Address, ttl, sockaddr);
+        this.enableValidation = true;
 
-        bufA = Unsafe.malloc(capacity, MemoryTag.NATIVE_DEFAULT);
-        bufB = Unsafe.malloc(capacity, MemoryTag.NATIVE_DEFAULT);
+        bufA = Unsafe.malloc(capacity, MemoryTag.NATIVE_ILP_RSS);
+        bufB = Unsafe.malloc(capacity, MemoryTag.NATIVE_ILP_RSS);
 
         lo = bufA;
         hi = lo + capacity;
@@ -91,169 +78,358 @@ public abstract class AbstractLineSender extends AbstractCharSink implements Clo
     }
 
     public void $(long timestamp) {
-        put(' ').put(timestamp);
-        $();
+        putAsciiInternal(' ').put(timestamp);
+        atNow();
     }
 
     public void $() {
-        put('\n');
+        atNow();
+    }
+
+    @Override
+    public final void atNow() {
+        if (!hasColumns && !hasSymbols && enableValidation) {
+            throw new LineSenderException("no symbols or columns were provided");
+        }
+
+        putAsciiInternal('\n');
         lineStart = ptr;
-        hasMetric = false;
-        noFields = true;
+        hasTable = false;
+        hasColumns = false;
+        hasSymbols = false;
+    }
+
+    public final void authenticate(String keyId, PrivateKey privateKey) {
+        validateNotClosed();
+        put(keyId);
+        putAsciiInternal('\n');
+        sendAll();
+
+        byte[] challengeBytes = receiveChallengeBytes();
+        byte[] signature = signAndEncode(privateKey, challengeBytes);
+        for (int n = 0, m = signature.length; n < m; n++) {
+            putAsciiInternal((char) signature[n]);
+        }
+        putAsciiInternal('\n');
+        sendAll();
+    }
+
+    @Override
+    public final AbstractLineSender boolColumn(CharSequence name, boolean value) {
+        return field(name, value);
     }
 
     @Override
     public void close() {
-        if (nf.close(fd) != 0) {
-            log.error().$("could not close UDP socket [fd=").$(fd).$(", errno=").$(nf.errno()).$(']').$();
+        if (closed) {
+            return;
         }
-        nf.freeSockAddr(sockaddr);
-        Unsafe.free(bufA, capacity, MemoryTag.NATIVE_DEFAULT);
-        Unsafe.free(bufB, capacity, MemoryTag.NATIVE_DEFAULT);
+        try {
+            flush();
+        } finally {
+            closed = true;
+            lineChannel = Misc.free(lineChannel);
+            Unsafe.free(bufA, capacity, MemoryTag.NATIVE_ILP_RSS);
+            Unsafe.free(bufB, capacity, MemoryTag.NATIVE_ILP_RSS);
+        }
+    }
+
+    /**
+     * This is for testing only. Where we want to test server with a misbehaving client.
+     */
+    public void disableValidation() {
+        enableValidation = false;
+    }
+
+    @Override
+    public final AbstractLineSender doubleColumn(CharSequence name, double value) {
+        return field(name, value);
     }
 
     public AbstractLineSender field(CharSequence name, long value) {
-        field(name).put(value).put('i');
+        writeFieldName(name).put(value).put('i');
         return this;
     }
 
     public AbstractLineSender field(CharSequence name, CharSequence value) {
-        field(name).put('"');
+        writeFieldName(name).put('"');
         quoted = true;
-        encodeUtf8(value);
+        put(value);
         quoted = false;
-        put('"');
+        putAsciiInternal('"');
         return this;
     }
 
     public AbstractLineSender field(CharSequence name, double value) {
-        field(name).put(value);
+        writeFieldName(name).put(value);
         return this;
     }
 
     public AbstractLineSender field(CharSequence name, boolean value) {
-        field(name).put(value ? 't' : 'f');
+        writeFieldName(name).putAsciiInternal(value ? 't' : 'f');
         return this;
     }
 
     @Override
     public void flush() {
+        validateNotClosed();
         sendLine();
         ptr = lineStart = lo;
     }
 
     @Override
-    public AbstractLineSender put(CharSequence cs) {
-        int l = cs.length();
-        if (ptr + l < hi) {
-            Chars.asciiStrCpy(cs, l, ptr);
-        } else {
-            send00();
-            if (ptr + l < hi) {
-                Chars.asciiStrCpy(cs, l, ptr);
-            } else {
-                throw CairoException.instance(0).put("value too long");
-            }
+    public final AbstractLineSender longColumn(CharSequence name, long value) {
+        return field(name, value);
+    }
+
+    public AbstractLineSender metric(CharSequence metric) {
+        validateNotClosed();
+        validateTableName(metric);
+        if (hasTable) {
+            throw new LineSenderException("duplicated table. call sender.at() or sender.atNow() to finish the current row first");
         }
-        ptr += l;
+        if (metric.length() == 0) {
+            throw new LineSenderException("table name cannot be empty");
+        }
+        quoted = false;
+        hasTable = true;
+        put(metric);
+        return this;
+    }
+
+    @Override
+    public AbstractLineSender put(@Nullable CharSequence cs) {
+        Utf8Sink.super.put(cs);
         return this;
     }
 
     @Override
     public AbstractLineSender put(char c) {
-        if (ptr >= hi) {
-            send00();
-        }
-        Unsafe.getUnsafe().putByte(ptr++, (byte) c);
+        Utf8Sink.super.put(c);
         return this;
     }
 
     @Override
-    public CharSink put(char[] chars, int start, int len) {
+    public AbstractLineSender put(@Nullable Utf8Sequence us) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public AbstractLineSender put(byte c) {
+        validateNotClosed();
+        if (ptr >= hi) {
+            send00();
+        }
+        Unsafe.getUnsafe().putByte(ptr++, c);
+        return this;
+    }
+
+    @Override
+    public AbstractLineSender put(long value) {
+        Numbers.append(this, value, false);
+        return this;
+    }
+
+    @Override
+    public AbstractLineSender putAscii(char @NotNull [] chars, int start, int len) {
+        validateNotClosed();
         if (ptr + len < hi) {
-            Chars.asciiCopyTo(chars, start, len, ptr);
+            Utf8s.strCpyAscii(chars, start, len, ptr);
         } else {
             send00();
             if (ptr + len < hi) {
-                Chars.asciiCopyTo(chars, start, len, ptr);
+                Utf8s.strCpyAscii(chars, start, len, ptr);
             } else {
-                throw CairoException.instance(0).put("value too long");
+                throw new LineSenderException("value too long. increase buffer size.");
             }
         }
         ptr += len;
         return this;
     }
 
-    public AbstractLineSender metric(CharSequence metric) {
-        if (hasMetric) {
-            throw CairoException.instance(0).put("duplicate metric");
+    @Override
+    public AbstractLineSender putAscii(@Nullable CharSequence cs) {
+        validateNotClosed();
+        if (cs != null) {
+            int l = cs.length();
+            if (ptr + l < hi) {
+                Utf8s.strCpyAscii(cs, l, ptr);
+            } else {
+                send00();
+                if (ptr + l < hi) {
+                    Utf8s.strCpyAscii(cs, l, ptr);
+                } else {
+                    throw new LineSenderException("value too long. increase buffer size.");
+                }
+            }
+            ptr += l;
         }
-        quoted = false;
-        hasMetric = true;
-        encodeUtf8(metric);
         return this;
     }
 
-    public AbstractLineSender tag(CharSequence tag, CharSequence value) {
-        if (hasMetric) {
-            put(',').encodeUtf8(tag).put('=').encodeUtf8(value);
-            return this;
-        }
-        throw CairoException.instance(0).put("metric expected");
-    }
-
-    protected abstract long createSocket(int interfaceIPv4Address, int ttl, long sockaddr);
-
-    private CharSink field(CharSequence name) {
-        if (hasMetric) {
-            if (noFields) {
-                put(' ');
-                noFields = false;
-            } else {
-                put(',');
-            }
-
-            return encodeUtf8(name).put('=');
-        }
-        throw CairoException.instance(0).put("metric expected");
-    }
-
     @Override
-    public void putUtf8Special(char c) {
+    public AbstractLineSender putAscii(char c) {
+        validateNotClosed();
         switch (c) {
             case ' ':
             case ',':
             case '=':
                 if (!quoted) {
-                    put('\\');
+                    put((byte) '\\');
                 }
             default:
-                put(c);
+                put((byte) c);
                 break;
             case '\n':
             case '\r':
-                put('\\').put(c);
+                put((byte) '\\').put((byte) c);
                 break;
             case '"':
                 if (quoted) {
-                    put('\\');
+                    put((byte) '\\');
                 }
-                put(c);
+                put((byte) c);
                 break;
             case '\\':
-                put('\\').put('\\');
+                put((byte) '\\').put((byte) '\\');
                 break;
         }
+        return this;
+    }
+
+    // doesn't do special char checks
+    public AbstractLineSender putAsciiInternal(char c) {
+        put((byte) c);
+        return this;
+    }
+
+    // doesn't do special char checks
+    public AbstractLineSender putAsciiInternal(@Nullable CharSequence cs) {
+        if (cs != null) {
+            int l = cs.length();
+            for (int i = 0; i < l; i++) {
+                putAsciiInternal(cs.charAt(i));
+            }
+        }
+        return this;
+    }
+
+    @Override
+    public AbstractLineSender putNonAscii(long lo, long hi) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final AbstractLineSender stringColumn(CharSequence name, CharSequence value) {
+        return field(name, value);
+    }
+
+    @Override
+    public final AbstractLineSender symbol(CharSequence name, CharSequence value) {
+        return tag(name, value);
+    }
+
+    @Override
+    public final AbstractLineSender table(CharSequence table) {
+        return metric(table);
+    }
+
+    public AbstractLineSender tag(CharSequence tag, CharSequence value) {
+        if (!hasTable) {
+            throw new LineSenderException("table expected");
+        }
+        if (hasColumns) {
+            throw new LineSenderException("symbols must be written before any other column types");
+        }
+        validateColumnName(tag);
+        putAsciiInternal(',').put(tag);
+        putAsciiInternal('=').put(value);
+        hasSymbols = true;
+        return this;
+    }
+
+    private static int findEOL(long ptr, int len) {
+        for (int i = 0; i < len; i++) {
+            byte b = Unsafe.getUnsafe().getByte(ptr + i);
+            if (b == (byte) '\n') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private byte[] receiveChallengeBytes() {
+        int n = 0;
+        for (; ; ) {
+            int rc = lineChannel.receive(ptr + n, capacity - n);
+            if (rc < 0) {
+                int errno = lineChannel.errno();
+                close();
+                throw new LineSenderException("disconnected during authentication").errno(errno);
+            }
+            int eol = findEOL(ptr + n, rc);
+            if (eol != -1) {
+                n += eol;
+                break;
+            }
+            n += rc;
+            if (n == capacity) {
+                close();
+                throw new LineSenderException("challenge did not fit into buffer");
+            }
+        }
+        int sz = n;
+        byte[] challengeBytes = new byte[sz];
+        for (n = 0; n < sz; n++) {
+            challengeBytes[n] = Unsafe.getUnsafe().getByte(ptr + n);
+        }
+        return challengeBytes;
     }
 
     private void sendLine() {
         if (lo < lineStart) {
             int len = (int) (lineStart - lo);
-            sendToSocket(fd, lo, sockaddr, len);
+            lineChannel.send(lo, len);
+        }
+    }
+
+    private void validateColumnName(CharSequence name) {
+        if (!enableValidation) {
+            return;
+        }
+        if (!TableUtils.isValidColumnName(name, Integer.MAX_VALUE)) {
+            throw new LineSenderException("column name contains an illegal char: '\\n', '\\r', '?', '.', ','" +
+                    ", ''', '\"', '\\', '/', ':', ')', '(', '+', '-', '*' '%%', '~', or a non-printable char: ").putAsPrintable(name);
+        }
+    }
+
+    private void validateTableName(CharSequence name) {
+        if (!enableValidation) {
+            return;
+        }
+        if (!TableUtils.isValidTableName(name, Integer.MAX_VALUE)) {
+            throw new LineSenderException("table name contains an illegal char: '\\n', '\\r', '?', ',', ''', " +
+                    "'\"', '\\', '/', ':', ')', '(', '+', '*' '%%', '~', or a non-printable char: ").putAsPrintable(name);
+        }
+    }
+
+    protected static long unitToNanos(ChronoUnit unit) {
+        switch (unit) {
+            case NANOS:
+                return 1;
+            case MICROS:
+                return 1_000;
+            case MILLIS:
+                return 1_000_000;
+            case SECONDS:
+                return 1_000_000_000;
+            default:
+                return unit.getDuration().toNanos();
         }
     }
 
     protected void send00() {
+        validateNotClosed();
         int len = (int) (ptr - lineStart);
         if (len == 0) {
             sendLine();
@@ -266,17 +442,59 @@ public abstract class AbstractLineSender extends AbstractCharSink implements Clo
             ptr = target + len;
             hi = lo + capacity;
         } else {
-            throw NetworkError.instance(0).put("line too long");
+            throw new LineSenderException("line too long. increase buffer size.");
         }
     }
 
     protected void sendAll() {
+        validateNotClosed();
         if (lo < ptr) {
             int len = (int) (ptr - lo);
-            sendToSocket(fd, lo, sockaddr, len);
+            lineChannel.send(lo, len);
             lineStart = ptr = lo;
         }
     }
 
-    protected abstract void sendToSocket(long fd, long lo, long sockaddr, int len);
+    protected byte[] signAndEncode(PrivateKey privateKey, byte[] challengeBytes) {
+        // protected for testing
+        byte[] rawSignature;
+        try {
+            Signature sig = Signature.getInstance(AuthUtils.SIGNATURE_TYPE_DER);
+            sig.initSign(privateKey);
+            sig.update(challengeBytes);
+            rawSignature = sig.sign();
+        } catch (InvalidKeyException ex) {
+            close();
+            throw new LineSenderException("invalid key", ex);
+        } catch (SignatureException ex) {
+            close();
+            throw new LineSenderException("cannot sign challenge", ex);
+        } catch (NoSuchAlgorithmException ex) {
+            close();
+            throw new LineSenderException("unsupported signing algorithm", ex);
+        }
+        return Base64.getEncoder().encode(rawSignature);
+    }
+
+    protected final void validateNotClosed() {
+        if (closed) {
+            throw new LineSenderException("sender already closed");
+        }
+    }
+
+    protected AbstractLineSender writeFieldName(CharSequence name) {
+        validateNotClosed();
+        validateColumnName(name);
+        if (hasTable) {
+            if (!hasColumns) {
+                putAsciiInternal(' ');
+                hasColumns = true;
+            } else {
+                putAsciiInternal(',');
+            }
+            put(name);
+            return putAsciiInternal('=');
+        }
+        throw new LineSenderException("table expected");
+    }
 }

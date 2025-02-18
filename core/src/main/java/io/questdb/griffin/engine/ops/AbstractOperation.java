@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,48 +24,50 @@
 
 package io.questdb.griffin.engine.ops;
 
+import io.questdb.cairo.SecurityContext;
+import io.questdb.cairo.TableToken;
 import io.questdb.cairo.sql.AsyncWriterCommand;
+import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.std.Misc;
+import io.questdb.std.QuietCloseable;
 import io.questdb.tasks.TableWriterTask;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
-public abstract class AbstractOperation implements AsyncWriterCommand {
-    private int cmdType;
+public abstract class AbstractOperation implements AsyncWriterCommand, QuietCloseable {
+    private static final long NO_CORRELATION_ID = -1L;
+    protected @Nullable TableToken tableToken;
+    @Nullable
+    SecurityContext securityContext;
+    @Nullable
+    SqlExecutionContext sqlExecutionContext;
+    @Nullable
+    CharSequence sqlText;
+    int tableNamePosition;
     private String cmdName;
+    private int cmdType;
+    private long correlationId;
     private int tableId;
     private long tableVersion;
-    private long correlationId;
 
-    String tableName;
-    int tableNamePosition;
+    public void clearCommandCorrelationId() {
+        setCommandCorrelationId(NO_CORRELATION_ID);
+    }
 
-    void init(
-            int cmdType,
-            String cmdName,
-            String tableName,
-            int tableId,
-            long tableVersion,
-            int tableNamePosition
-    ) {
-        this.cmdType = cmdType;
-        this.cmdName = cmdName;
-        this.tableName = tableName;
-        this.tableId = tableId;
-        this.tableVersion = tableVersion;
-        this.tableNamePosition = tableNamePosition;
+    public void clearSecurityContext() {
+        Misc.clear(securityContext);
     }
 
     @Override
-    public int getTableId() {
-        return tableId;
+    public void close() {
+        // todo: temporary fix, until a proper lifecycle around CompiledQuery
+        // is implemented
+//        this.tableToken = null;
     }
 
     @Override
-    public long getTableVersion() {
-        return tableVersion;
-    }
-
-    @Override
-    public String getTableName() {
-        return tableName;
+    public int getCmdType() {
+        return cmdType;
     }
 
     @Override
@@ -74,13 +76,43 @@ public abstract class AbstractOperation implements AsyncWriterCommand {
     }
 
     @Override
+    public long getCorrelationId() {
+        return correlationId;
+    }
+
+    public @Nullable SqlExecutionContext getSqlExecutionContext() {
+        return sqlExecutionContext;
+    }
+
+    public @Nullable CharSequence getSqlText() {
+        return sqlText;
+    }
+
+    @Override
+    public int getTableId() {
+        return tableId;
+    }
+
+    @Override
     public int getTableNamePosition() {
         return tableNamePosition;
     }
 
     @Override
-    public long getCorrelationId() {
-        return correlationId;
+    public @NotNull TableToken getTableToken() {
+        assert tableToken != null : "initialized operation";
+        return tableToken;
+    }
+
+    @Override
+    public long getTableVersion() {
+        return tableVersion;
+    }
+
+    @Override
+    public void serialize(TableWriterTask task) {
+        task.of(cmdType, tableId, tableToken);
+        task.setInstance(correlationId);
     }
 
     @Override
@@ -88,9 +120,37 @@ public abstract class AbstractOperation implements AsyncWriterCommand {
         this.correlationId = correlationId;
     }
 
-    @Override
-    public void serialize(TableWriterTask task) {
-        task.of(cmdType, tableId, tableName);
-        task.setInstance(correlationId);
+    public void withContext(@NotNull SqlExecutionContext sqlExecutionContext) {
+        this.sqlExecutionContext = sqlExecutionContext;
+        this.securityContext = sqlExecutionContext.getSecurityContext();
+    }
+
+    public void withSecurityContext(@Nullable SecurityContext securityContext) {
+        this.securityContext = securityContext;
+    }
+
+    public void withSqlStatement(CharSequence sqlStatement) {
+        this.sqlText = sqlStatement;
+    }
+
+    void init(
+            int cmdType,
+            String cmdName,
+            TableToken tableToken,
+            int tableId,
+            long tableVersion,
+            int tableNamePosition
+    ) {
+        this.cmdType = cmdType;
+        this.cmdName = cmdName;
+        this.tableToken = tableToken;
+        this.tableId = tableId;
+        this.tableVersion = tableVersion;
+        this.tableNamePosition = tableNamePosition;
+        this.correlationId = NO_CORRELATION_ID;
+    }
+
+    public boolean isForceWalBypass() {
+        return false;
     }
 }

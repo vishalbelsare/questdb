@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,19 +25,17 @@
 package io.questdb.griffin.engine;
 
 import io.questdb.cairo.AbstractRecordCursorFactory;
+import io.questdb.cairo.TableToken;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.Misc;
 
 public class EmptyTableRecordCursorFactory extends AbstractRecordCursorFactory {
+
     public EmptyTableRecordCursorFactory(RecordMetadata metadata) {
         super(metadata);
-    }
-
-    @Override
-    public void close() {
-        Misc.free(getMetadata());
     }
 
     @Override
@@ -48,5 +46,20 @@ public class EmptyTableRecordCursorFactory extends AbstractRecordCursorFactory {
     @Override
     public boolean recordCursorSupportsRandomAccess() {
         return false;
+    }
+
+    @Override
+    public boolean supportsUpdateRowId(TableToken tableToken) {
+        return true;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Empty table");
+    }
+
+    @Override
+    protected void _close() {
+        Misc.freeIfCloseable(getMetadata());
     }
 }

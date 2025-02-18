@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,15 +28,16 @@ import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.engine.functions.groupby.InterpolationGroupByFunction;
 import io.questdb.std.BinarySequence;
+import io.questdb.std.Interval;
 import io.questdb.std.ObjList;
-import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
 
 public class SplitVirtualRecord implements Record {
     private final ObjList<? extends Function> functionsA;
     private final ObjList<? extends Function> functionsB;
     private final ObjList<InterpolationGroupByFunction> interpolations = new ObjList<>();
-    private ObjList<? extends Function> current;
     private Record base;
+    private ObjList<? extends Function> current;
 
     public SplitVirtualRecord(ObjList<? extends Function> functionsA, ObjList<? extends Function> functionsB) {
         this.current = functionsA;
@@ -96,8 +97,38 @@ public class SplitVirtualRecord implements Record {
     }
 
     @Override
+    public byte getGeoByte(int col) {
+        return getFunction(col).getGeoByte(base);
+    }
+
+    @Override
+    public int getGeoInt(int col) {
+        return getFunction(col).getGeoInt(base);
+    }
+
+    @Override
+    public long getGeoLong(int col) {
+        return getFunction(col).getGeoLong(base);
+    }
+
+    @Override
+    public short getGeoShort(int col) {
+        return getFunction(col).getGeoShort(base);
+    }
+
+    @Override
+    public int getIPv4(int col) {
+        return getFunction(col).getIPv4(base);
+    }
+
+    @Override
     public int getInt(int col) {
         return getFunction(col).getInt(base);
+    }
+
+    @Override
+    public Interval getInterval(int col) {
+        return getFunction(col).getInterval(base);
     }
 
     @Override
@@ -106,8 +137,18 @@ public class SplitVirtualRecord implements Record {
     }
 
     @Override
-    public long getRowId() {
-        throw new UnsupportedOperationException();
+    public long getLong128Hi(int col) {
+        return getFunction(col).getLong128Hi(base);
+    }
+
+    @Override
+    public long getLong128Lo(int col) {
+        return getFunction(col).getLong128Lo(base);
+    }
+
+    @Override
+    public Record getRecord(int col) {
+        return getFunction(col).getRecord(base);
     }
 
     @Override
@@ -116,18 +157,8 @@ public class SplitVirtualRecord implements Record {
     }
 
     @Override
-    public CharSequence getStr(int col) {
-        return getFunction(col).getStr(base);
-    }
-
-    @Override
-    public void getStr(int col, CharSink sink) {
-        getFunction(col).getStr(base, sink);
-    }
-
-    @Override
-    public Record getRecord(int col) {
-        return getFunction(col).getRecord(base);
+    public CharSequence getStrA(int col) {
+        return getFunction(col).getStrA(base);
     }
 
     @Override
@@ -141,7 +172,7 @@ public class SplitVirtualRecord implements Record {
     }
 
     @Override
-    public CharSequence getSym(int col) {
+    public CharSequence getSymA(int col) {
         return getFunction(col).getSymbol(base);
     }
 
@@ -156,27 +187,18 @@ public class SplitVirtualRecord implements Record {
     }
 
     @Override
-    public byte getGeoByte(int col) {
-        return getFunction(col).getGeoByte(base);
+    public Utf8Sequence getVarcharA(int col) {
+        return getFunction(col).getVarcharA(base);
     }
 
     @Override
-    public short getGeoShort(int col) {
-        return getFunction(col).getGeoShort(base);
+    public Utf8Sequence getVarcharB(int col) {
+        return getFunction(col).getVarcharB(base);
     }
 
     @Override
-    public int getGeoInt(int col) {
-        return getFunction(col).getGeoInt(base);
-    }
-
-    @Override
-    public long getGeoLong(int col) {
-        return getFunction(col).getGeoLong(base);
-    }
-
-    void of(Record record) {
-        this.base = record;
+    public int getVarcharSize(int col) {
+        return getFunction(col).getVarcharSize(base);
     }
 
     public void setActiveA() {
@@ -197,7 +219,7 @@ public class SplitVirtualRecord implements Record {
         }
     }
 
-    public void setTarget(Record target) {
+    public void setInterpolationTarget(Record target) {
         for (int i = 0, n = interpolations.size(); i < n; i++) {
             interpolations.get(i).setTarget(target);
         }
@@ -205,5 +227,9 @@ public class SplitVirtualRecord implements Record {
 
     private Function getFunction(int columnIndex) {
         return current.getQuick(columnIndex);
+    }
+
+    void of(Record record) {
+        this.base = record;
     }
 }

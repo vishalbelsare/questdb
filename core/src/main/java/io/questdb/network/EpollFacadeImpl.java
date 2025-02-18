@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,17 +26,19 @@ package io.questdb.network;
 
 import io.questdb.std.Os;
 
+import static io.questdb.std.Files.toOsFd;
+
 public class EpollFacadeImpl implements EpollFacade {
     public static final EpollFacadeImpl INSTANCE = new EpollFacadeImpl();
 
     @Override
-    public long epollCreate() {
+    public int epollCreate() {
         return EpollAccessor.epollCreate();
     }
 
     @Override
     public int epollCtl(long epFd, int op, long fd, long eventPtr) {
-        return EpollAccessor.epollCtl(epFd, op, fd, eventPtr);
+        return EpollAccessor.epollCtl(toOsFd(epFd), op, toOsFd(fd), eventPtr);
     }
 
     @Override
@@ -45,12 +47,27 @@ public class EpollFacadeImpl implements EpollFacade {
     }
 
     @Override
+    public int errno() {
+        return Os.errno();
+    }
+
+    @Override
+    public int eventFd() {
+        return EpollAccessor.eventFd();
+    }
+
+    @Override
     public NetworkFacade getNetworkFacade() {
         return NetworkFacadeImpl.INSTANCE;
     }
 
     @Override
-    public int errno() {
-        return Os.errno();
+    public long readEventFd(long fd) {
+        return EpollAccessor.readEventFd(fd);
+    }
+
+    @Override
+    public int writeEventFd(long fd) {
+        return EpollAccessor.writeEventFd(fd);
     }
 }

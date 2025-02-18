@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 
 package io.questdb.griffin.engine.groupby;
 
+import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordCursorFactory;
@@ -33,10 +34,9 @@ import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.Misc;
 import io.questdb.std.ObjList;
 
-public abstract class AbstractSampleByRecordCursorFactory implements RecordCursorFactory {
+public abstract class AbstractSampleByRecordCursorFactory extends AbstractRecordCursorFactory {
 
     protected final RecordCursorFactory base;
-    protected final RecordMetadata metadata;
     protected final ObjList<Function> recordFunctions;
 
     public AbstractSampleByRecordCursorFactory(
@@ -44,20 +44,14 @@ public abstract class AbstractSampleByRecordCursorFactory implements RecordCurso
             RecordMetadata metadata,
             ObjList<Function> recordFunctions
     ) {
+        super(metadata);
         this.base = base;
-        this.metadata = metadata;
         this.recordFunctions = recordFunctions;
     }
 
     @Override
-    public void close() {
-        Misc.freeObjList(recordFunctions);
-        Misc.free(base);
-    }
-
-    @Override
-    public RecordMetadata getMetadata() {
-        return metadata;
+    public RecordCursorFactory getBaseFactory() {
+        return base;
     }
 
     @Override
@@ -70,6 +64,17 @@ public abstract class AbstractSampleByRecordCursorFactory implements RecordCurso
         return base.usesCompiledFilter();
     }
 
+    @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
+
+    @Override
+    protected void _close() {
+        Misc.freeObjList(recordFunctions);
+        Misc.free(base);
+    }
+
     protected abstract AbstractNoRecordSampleByCursor getRawCursor();
 
     protected RecordCursor initFunctionsAndCursor(
@@ -77,14 +82,21 @@ public abstract class AbstractSampleByRecordCursorFactory implements RecordCurso
             RecordCursor baseCursor
     ) throws SqlException {
         try {
-            AbstractNoRecordSampleByCursor cursor = getRawCursor();
-            cursor.of(baseCursor, executionContext);
-            // init all record function for this cursor, in case functions require metadata and/or symbol tables
+            // init all record functions for this cursor, in case functions require metadata and/or symbol tables
             Function.init(recordFunctions, baseCursor, executionContext);
-            return cursor;
-        } catch (Throwable ex) {
+        } catch (Throwable th) {
             Misc.free(baseCursor);
-            throw ex;
+            throw th;
+        }
+
+        AbstractNoRecordSampleByCursor cursor = null;
+        try {
+            cursor = getRawCursor();
+            cursor.of(baseCursor, executionContext);
+            return cursor;
+        } catch (Throwable th) {
+            Misc.free(cursor);
+            throw th;
         }
     }
 }

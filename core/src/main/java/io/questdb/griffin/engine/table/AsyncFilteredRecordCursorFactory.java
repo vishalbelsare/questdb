@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,36 +25,38 @@
 package io.questdb.griffin.engine.table;
 
 import io.questdb.MessageBus;
+import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.TableToken;
 import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.async.PageFrameReduceTask;
+import io.questdb.cairo.sql.async.PageFrameReduceTaskFactory;
 import io.questdb.cairo.sql.async.PageFrameReducer;
 import io.questdb.cairo.sql.async.PageFrameSequence;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.mp.SCSequence;
-import io.questdb.mp.Sequence;
 import io.questdb.std.*;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.Closeable;
+import static io.questdb.cairo.sql.PartitionFrameCursorFactory.*;
 
-import static io.questdb.cairo.sql.DataFrameCursorFactory.*;
-
-public class AsyncFilteredRecordCursorFactory implements RecordCursorFactory {
+public class AsyncFilteredRecordCursorFactory extends AbstractRecordCursorFactory {
 
     private static final PageFrameReducer REDUCER = AsyncFilteredRecordCursorFactory::filter;
 
     private final RecordCursorFactory base;
-    private final AsyncFilteredRecordCursor cursor;
-    private final AsyncFilteredNegativeLimitRecordCursor negativeLimitCursor;
-    private final FilterAtom filterAtom;
-    private final PageFrameSequence<FilterAtom> frameSequence;
     private final SCSequence collectSubSeq = new SCSequence();
+    private final AsyncFilteredRecordCursor cursor;
+    private final Function filter;
+    private final PageFrameSequence<AsyncFilterAtom> frameSequence;
     private final Function limitLoFunction;
     private final int limitLoPos;
     private final int maxNegativeLimit;
+    private final AsyncFilteredNegativeLimitRecordCursor negativeLimitCursor;
+    private final int workerCount;
     private DirectLongList negativeLimitRows;
 
     public AsyncFilteredRecordCursorFactory(
@@ -62,30 +64,36 @@ public class AsyncFilteredRecordCursorFactory implements RecordCursorFactory {
             @NotNull MessageBus messageBus,
             @NotNull RecordCursorFactory base,
             @NotNull Function filter,
-            @NotNull @Transient WeakClosableObjectPool<PageFrameReduceTask> localTaskPool,
+            @NotNull PageFrameReduceTaskFactory reduceTaskFactory,
             @Nullable ObjList<Function> perWorkerFilters,
             @Nullable Function limitLoFunction,
-            int limitLoPos
+            int limitLoPos,
+            boolean preTouchColumns,
+            int workerCount
     ) {
+        super(base.getMetadata());
         assert !(base instanceof AsyncFilteredRecordCursorFactory);
         this.base = base;
-        this.cursor = new AsyncFilteredRecordCursor(filter, base.hasDescendingOrder());
-        this.negativeLimitCursor = new AsyncFilteredNegativeLimitRecordCursor();
-        this.filterAtom = new FilterAtom(filter, perWorkerFilters);
-        this.frameSequence = new PageFrameSequence<>(configuration, messageBus, REDUCER, localTaskPool);
+        this.filter = filter;
+        this.cursor = new AsyncFilteredRecordCursor(configuration, filter, base.getScanDirection());
+        this.negativeLimitCursor = new AsyncFilteredNegativeLimitRecordCursor(configuration, base.getScanDirection());
+        final int columnCount = base.getMetadata().getColumnCount();
+        final IntList columnTypes = new IntList(columnCount);
+        for (int i = 0; i < columnCount; i++) {
+            int columnType = base.getMetadata().getColumnType(i);
+            columnTypes.add(columnType);
+        }
+        AsyncFilterAtom atom = new AsyncFilterAtom(configuration, filter, perWorkerFilters, columnTypes, !preTouchColumns);
+        this.frameSequence = new PageFrameSequence<>(configuration, messageBus, atom, REDUCER, reduceTaskFactory, workerCount, PageFrameReduceTask.TYPE_FILTER);
         this.limitLoFunction = limitLoFunction;
         this.limitLoPos = limitLoPos;
         this.maxNegativeLimit = configuration.getSqlMaxNegativeLimit();
+        this.workerCount = workerCount;
     }
 
     @Override
-    public void close() {
-        Misc.free(base);
-        Misc.free(filterAtom);
-        Misc.free(frameSequence);
-        Misc.free(negativeLimitRows);
-        cursor.freeRecords();
-        negativeLimitCursor.freeRecords();
+    public PageFrameSequence<AsyncFilterAtom> execute(SqlExecutionContext executionContext, SCSequence collectSubSeq, int order) throws SqlException {
+        return frameSequence.of(base, executionContext, collectSubSeq, order);
     }
 
     @Override
@@ -94,8 +102,14 @@ public class AsyncFilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
+    public RecordCursorFactory getBaseFactory() {
+        return base;
+    }
+
+    @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
         long rowsRemaining;
+        int baseOrder = base.getScanDirection() == SCAN_DIRECTION_BACKWARD ? ORDER_DESC : ORDER_ASC;
         final int order;
         if (limitLoFunction != null) {
             limitLoFunction.init(frameSequence.getSymbolTableSource(), executionContext);
@@ -103,17 +117,17 @@ public class AsyncFilteredRecordCursorFactory implements RecordCursorFactory {
             // on negative limit we will be looking for positive number of rows
             // while scanning table from the highest timestamp to the lowest
             if (rowsRemaining > -1) {
-                order = ORDER_ASC;
+                order = baseOrder;
             } else {
-                order = ORDER_DESC;
+                order = reverse(baseOrder);
                 rowsRemaining = -rowsRemaining;
             }
         } else {
             rowsRemaining = Long.MAX_VALUE;
-            order = ORDER_ANY;
+            order = baseOrder;
         }
 
-        if (order == ORDER_DESC) {
+        if (order != baseOrder && rowsRemaining != Long.MAX_VALUE) {
             if (rowsRemaining > maxNegativeLimit) {
                 throw SqlException.position(limitLoPos).put("absolute LIMIT value is too large, maximum allowed value: ").put(maxNegativeLimit);
             }
@@ -129,13 +143,25 @@ public class AsyncFilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return base.getMetadata();
+    public @NotNull Function getFilter() {
+        return filter;
     }
 
     @Override
-    public PageFrameSequence<FilterAtom> execute(SqlExecutionContext executionContext, Sequence collectSubSeq, int order) throws SqlException {
-        return frameSequence.of(base, executionContext, collectSubSeq, filterAtom, order);
+    public int getScanDirection() {
+        return base.getScanDirection();
+    }
+
+    @Override
+    public TableToken getTableToken() {
+        return base.getTableToken();
+    }
+
+    @Override
+    public void halfClose() {
+        Misc.free(frameSequence);
+        cursor.freeRecords();
+        negativeLimitCursor.freeRecords();
     }
 
     @Override
@@ -144,72 +170,88 @@ public class AsyncFilteredRecordCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public boolean supportsUpdateRowId(CharSequence tableName) {
-        return base.supportsUpdateRowId(tableName);
+    public boolean supportsFilterStealing() {
+        return limitLoFunction == null;
     }
 
     @Override
-    public boolean usesCompiledFilter() {
-        return base.usesCompiledFilter();
+    public boolean supportsUpdateRowId(TableToken tableToken) {
+        return base.supportsUpdateRowId(tableToken);
     }
 
     @Override
-    public boolean hasDescendingOrder() {
-        return base.hasDescendingOrder();
+    public void toPlan(PlanSink sink) {
+        sink.type("Async Filter");
+        sink.meta("workers").val(workerCount);
+        // calc order and limit if possible
+        long rowsRemaining;
+        int baseOrder = base.getScanDirection() == SCAN_DIRECTION_BACKWARD ? ORDER_DESC : ORDER_ASC;
+        int order;
+        if (limitLoFunction != null) {
+            try {
+                limitLoFunction.init(frameSequence.getSymbolTableSource(), sink.getExecutionContext());
+                rowsRemaining = limitLoFunction.getLong(null);
+            } catch (Exception e) {
+                rowsRemaining = Long.MAX_VALUE;
+            }
+            if (rowsRemaining > -1) {
+                order = baseOrder;
+            } else {
+                order = reverse(baseOrder);
+                rowsRemaining = -rowsRemaining;
+            }
+        } else {
+            rowsRemaining = Long.MAX_VALUE;
+            order = baseOrder;
+        }
+        if (rowsRemaining != Long.MAX_VALUE) {
+            sink.attr("limit").val(rowsRemaining);
+        }
+        sink.attr("filter").val(frameSequence.getAtom());
+        sink.child(base, order);
     }
 
-    private static void filter(int workerId, PageAddressCacheRecord record, PageFrameReduceTask task) {
-        final DirectLongList rows = task.getRows();
+    private static void filter(
+            int workerId,
+            @NotNull PageFrameMemoryRecord record,
+            @NotNull PageFrameReduceTask task,
+            @NotNull SqlExecutionCircuitBreaker circuitBreaker,
+            @Nullable PageFrameSequence<?> stealingFrameSequence
+    ) {
+        final DirectLongList rows = task.getFilteredRows();
         final long frameRowCount = task.getFrameRowCount();
-        final FilterAtom atom = task.getFrameSequence(FilterAtom.class).getAtom();
-        final Function filter = atom.getFilter(workerId);
+        final AsyncFilterAtom atom = task.getFrameSequence(AsyncFilterAtom.class).getAtom();
+
+        final PageFrameMemory frameMemory = task.populateFrameMemory();
+        record.init(frameMemory);
 
         rows.clear();
-        for (long r = 0; r < frameRowCount; r++) {
-            record.setRowIndex(r);
-            if (filter.getBool(record)) {
-                rows.add(r);
+
+        final boolean owner = stealingFrameSequence != null && stealingFrameSequence == task.getFrameSequence();
+        final int filterId = atom.maybeAcquireFilter(workerId, owner, circuitBreaker);
+        final Function filter = atom.getFilter(filterId);
+        try {
+            for (long r = 0; r < frameRowCount; r++) {
+                record.setRowIndex(r);
+                if (filter.getBool(record)) {
+                    rows.add(r);
+                }
             }
+        } finally {
+            atom.releaseFilter(filterId);
+        }
+
+        // Pre-touch native columns, if asked.
+        if (frameMemory.getFrameFormat() == PartitionFormat.NATIVE) {
+            atom.preTouchColumns(record, rows);
         }
     }
 
-    private static class FilterAtom implements StatefulAtom, Closeable {
-
-        private final Function filter;
-        private final ObjList<Function> perWorkerFilters;
-
-        public FilterAtom(@NotNull Function filter, @Nullable ObjList<Function> perWorkerFilters) {
-            this.filter = filter;
-            this.perWorkerFilters = perWorkerFilters;
-        }
-
-        @Override
-        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
-            filter.init(symbolTableSource, executionContext);
-            if (perWorkerFilters != null) {
-                final boolean current = executionContext.getCloneSymbolTables();
-                executionContext.setCloneSymbolTables(true);
-                try {
-                    for (int i = 0, n = perWorkerFilters.size(); i < n; i++) {
-                        perWorkerFilters.getQuick(i).init(symbolTableSource, executionContext);
-                    }
-                } finally {
-                    executionContext.setCloneSymbolTables(current);
-                }
-            }
-        }
-
-        @Override
-        public void close() {
-            Misc.free(filter);
-            Misc.freeObjList(perWorkerFilters);
-        }
-
-        public Function getFilter(int workerId) {
-            if (workerId == -1 || perWorkerFilters == null) {
-                return filter;
-            }
-            return perWorkerFilters.getQuick(workerId);
-        }
+    @Override
+    protected void _close() {
+        Misc.free(base);
+        Misc.free(negativeLimitRows);
+        halfClose();
+        Misc.free(filter);
     }
 }

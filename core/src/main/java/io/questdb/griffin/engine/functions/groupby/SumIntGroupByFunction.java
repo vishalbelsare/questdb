@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -44,9 +44,9 @@ public class SumIntGroupByFunction extends LongFunction implements GroupByFuncti
     }
 
     @Override
-    public void computeFirst(MapValue mapValue, Record record) {
+    public void computeFirst(MapValue mapValue, Record record, long rowId) {
         final int value = arg.getInt(record);
-        if (value != Numbers.INT_NaN) {
+        if (value != Numbers.INT_NULL) {
             mapValue.putLong(valueIndex, value);
             mapValue.putLong(valueIndex + 1, 1);
         } else {
@@ -56,24 +56,67 @@ public class SumIntGroupByFunction extends LongFunction implements GroupByFuncti
     }
 
     @Override
-    public void computeNext(MapValue mapValue, Record record) {
+    public void computeNext(MapValue mapValue, Record record, long rowId) {
         final int value = arg.getInt(record);
-        if (value != Numbers.INT_NaN) {
+        if (value != Numbers.INT_NULL) {
             mapValue.addLong(valueIndex, arg.getInt(record));
             mapValue.addLong(valueIndex + 1, 1);
         }
     }
 
     @Override
-    public void pushValueTypes(ArrayColumnTypes columnTypes) {
+    public Function getArg() {
+        return arg;
+    }
+
+    @Override
+    public long getLong(Record rec) {
+        return rec.getLong(valueIndex + 1) > 0 ? rec.getLong(valueIndex) : Numbers.LONG_NULL;
+    }
+
+    @Override
+    public String getName() {
+        return "sum";
+    }
+
+    @Override
+    public int getSampleByFlags() {
+        return GroupByFunction.SAMPLE_BY_FILL_ALL;
+    }
+
+    @Override
+    public int getValueIndex() {
+        return valueIndex;
+    }
+
+    @Override
+    public void initValueIndex(int valueIndex) {
+        this.valueIndex = valueIndex;
+    }
+
+    @Override
+    public void initValueTypes(ArrayColumnTypes columnTypes) {
         this.valueIndex = columnTypes.getColumnCount();
         columnTypes.add(ColumnType.LONG);
         columnTypes.add(ColumnType.LONG);
     }
 
     @Override
-    public long getLong(Record rec) {
-        return rec.getLong(valueIndex + 1) > 0 ? rec.getLong(valueIndex) : Numbers.LONG_NaN;
+    public boolean isConstant() {
+        return false;
+    }
+
+    @Override
+    public boolean isThreadSafe() {
+        return UnaryFunction.super.isThreadSafe();
+    }
+
+    @Override
+    public void merge(MapValue destValue, MapValue srcValue) {
+        long srcSum = srcValue.getLong(valueIndex);
+        long srcCount = srcValue.getLong(valueIndex + 1);
+        destValue.addLong(valueIndex, srcSum);
+        destValue.addLong(valueIndex + 1, srcCount);
     }
 
     @Override
@@ -83,18 +126,13 @@ public class SumIntGroupByFunction extends LongFunction implements GroupByFuncti
     }
 
     @Override
-    public Function getArg() {
-        return arg;
-    }
-
-    @Override
     public void setNull(MapValue mapValue) {
-        mapValue.putLong(valueIndex, Numbers.LONG_NaN);
+        mapValue.putLong(valueIndex, Numbers.LONG_NULL);
         mapValue.putLong(valueIndex + 1, 0);
     }
 
     @Override
-    public boolean isConstant() {
-        return false;
+    public boolean supportsParallelism() {
+        return UnaryFunction.super.supportsParallelism();
     }
 }

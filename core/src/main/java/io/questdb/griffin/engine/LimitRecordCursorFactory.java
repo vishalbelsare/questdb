@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,10 +25,12 @@
 package io.questdb.griffin.engine;
 
 import io.questdb.cairo.AbstractRecordCursorFactory;
-import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.std.Misc;
 import org.jetbrains.annotations.Nullable;
 
 public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
@@ -42,9 +44,36 @@ public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
     }
 
     @Override
+    public RecordCursorFactory getBaseFactory() {
+        return base;
+    }
+
+    @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        cursor.of(base.getCursor(executionContext), executionContext);
-        return cursor;
+        boolean preTouchEnabled = executionContext.isColumnPreTouchEnabled();
+        // Forcefully disable column pre-touch for LIMIT K,N queries for all downstream
+        // async filtered factories to avoid redundant disk reads.
+        executionContext.setColumnPreTouchEnabled(preTouchEnabled && cursor.hiFunction == null);
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            cursor.of(baseCursor, executionContext);
+            return cursor;
+        } catch (Throwable th) {
+            cursor.close();
+            throw th;
+        } finally {
+            executionContext.setColumnPreTouchEnabled(preTouchEnabled);
+        }
+    }
+
+    @Override
+    public int getScanDirection() {
+        return base.getScanDirection();
+    }
+
+    @Override
+    public boolean implementsLimit() {
+        return true;
     }
 
     @Override
@@ -53,26 +82,46 @@ public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
     }
 
     @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Limit");
+        if (cursor.loFunction != null) {
+            sink.meta("lo").val(cursor.loFunction);
+        }
+        if (cursor.hiFunction != null) {
+            sink.meta("hi").val(cursor.hiFunction);
+        }
+        sink.child(base);
+    }
+
+    @Override
     public boolean usesCompiledFilter() {
         return base.usesCompiledFilter();
     }
 
     @Override
-    public void close() {
-        base.close();
+    public boolean usesIndex() {
+        return base.usesIndex();
     }
 
     @Override
-    public boolean implementsLimit() {
-        return true;
+    protected void _close() {
+        base.close();
     }
 
     private static class LimitRecordCursor implements RecordCursor {
-        private final Function loFunction;
+        private final RecordCursor.Counter counter = new Counter();
         private final Function hiFunction;
+        private final Function loFunction;
+        private boolean areRowsCounted;
         private RecordCursor base;
+        private SqlExecutionCircuitBreaker circuitBreaker;
+        private long hi;
+        private boolean isLimitCounted;
         private long limit;
+        private long lo;
+        private long rowCount;
         private long size;
+        private long skipToRows;
 
         public LimitRecordCursor(Function loFunction, Function hiFunction) {
             this.loFunction = loFunction;
@@ -80,16 +129,27 @@ public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
         }
 
         @Override
-        public void close() {
-            base.close();
+        public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, Counter counter) {
+            if (areRowsCounted && limit > 0) {
+                counter.add(size);
+                limit = 0;
+                return;
+            }
+
+            if (!isLimitCounted) {
+                countLimit();
+                isLimitCounted = true;
+            }
+
+            while (limit > 0 && base.hasNext()) {
+                limit--;
+                counter.inc();
+            }
         }
 
         @Override
-        public long size() {
-            if (size > -1) {
-                return size;
-            }
-            return -1;
+        public void close() {
+            base = Misc.free(base);
         }
 
         @Override
@@ -98,28 +158,34 @@ public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
         }
 
         @Override
-        public SymbolTable getSymbolTable(int columnIndex) {
-            return base.getSymbolTable(columnIndex);
-        }
-
-        @Override
-        public SymbolTable newSymbolTable(int columnIndex) {
-            return base.newSymbolTable(columnIndex);
-        }
-
-        @Override
-        public boolean hasNext() {
-            return limit-- > 0 && base.hasNext();
-        }
-
-        @Override
         public Record getRecordB() {
             return base.getRecordB();
         }
 
         @Override
-        public void recordAt(Record record, long atRowId) {
-            base.recordAt(record, atRowId);
+        public SymbolTable getSymbolTable(int columnIndex) {
+            return base.getSymbolTable(columnIndex);
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (!isLimitCounted) {
+                countLimit();
+                isLimitCounted = true;
+            }
+            if (limit <= 0) {
+                return false;
+            }
+            if (base.hasNext()) {
+                limit--;
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        public SymbolTable newSymbolTable(int columnIndex) {
+            return base.newSymbolTable(columnIndex);
         }
 
         public void of(RecordCursor base, SqlExecutionContext executionContext) throws SqlException {
@@ -128,56 +194,78 @@ public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
             if (hiFunction != null) {
                 hiFunction.init(base, executionContext);
             }
+            this.circuitBreaker = executionContext.getCircuitBreaker();
             toTop();
+        }
+
+        @Override
+        public void recordAt(Record record, long atRowId) {
+            base.recordAt(record, atRowId);
+        }
+
+        @Override
+        public long size() {
+            return areRowsCounted ? size : -1;
         }
 
         @Override
         public void toTop() {
             base.toTop();
-            long lo = loFunction.getLong(null);
+            rowCount = -1;
+            size = -1;
+            skipToRows = -1;
+            lo = loFunction.getLong(null);
+            hi = hiFunction != null ? hiFunction.getLong(null) : -1;
+            isLimitCounted = false;
+            areRowsCounted = false;
+            counter.clear();
+        }
+
+        private void countLimit() {
             if (lo < 0 && hiFunction == null) {
                 // last N rows
-                long count = countRows();
+                countRows();
 
-                base.toTop();
                 // lo is negative, -5 for example
-                // if we have 12 records we need to skip 12-5 = 7
-                // if we have 4 records = return all of them
-                if (count > -lo) {
-                    skipTo(count + lo);
+                // if we have 12 records, we need to skip 12-5 = 7
+                // if we have 4 records, return all of them
+                if (rowCount > -lo) {
+                    skipRows(rowCount + lo);
+                } else {
+                    base.toTop();
                 }
                 // set limit to return remaining rows
-                limit = Math.min(count, -lo);
+                limit = Math.min(rowCount, -lo);
                 size = limit;
             } else if (lo > -1 && hiFunction == null) {
                 // first N rows
                 long baseRowCount = base.size();
-                if (baseRowCount > -1L) {//don't want to cause a pass-through whole data set
+                if (baseRowCount > -1) { // we don't want to cause a pass-through whole data set
                     limit = Math.min(baseRowCount, lo);
+                    areRowsCounted = true;
                 } else {
                     limit = lo;
+                    areRowsCounted = false;
                 }
                 size = limit;
             } else {
                 // at this stage we have 'hi'
-                long hi = hiFunction.getLong(null);
                 if (lo < 0) {
                     // right, here we are looking for something like
                     // -10,-5 five rows away from tail
 
                     if (lo < hi) {
-                        long count = countRows();
+                        countRows();
                         // when count < -hi we have empty cursor
-                        if (count >= -hi) {
-                            base.toTop();
-
-                            if (count < -lo) {
+                        if (rowCount >= -hi) {
+                            if (rowCount < -lo) {
+                                base.toTop();
                                 // if we asked for -9,-4 but there are 7 records in cursor
                                 // we would first ignore last 4 and return first 3
-                                limit = count + hi;
+                                limit = rowCount + hi;
                             } else {
-                                skipTo(count + lo);
-                                limit = Math.min(count, -lo + hi);
+                                skipRows(rowCount + lo);
+                                limit = Math.min(rowCount, -lo + hi);
                             }
                             size = limit;
                         }
@@ -188,42 +276,63 @@ public class LimitRecordCursorFactory extends AbstractRecordCursorFactory {
                     }
                 } else {
                     if (hi < 0) {
-                        limit = Math.max(countRows() - lo + hi, 0);
+                        countRows();
+                        limit = Math.max(rowCount - lo + hi, 0);
                         size = limit;
-                        base.toTop();
+
+                        if (lo > 0 && limit > 0) {
+                            skipRows(lo);
+                        } else {
+                            base.toTop();
+                        }
                     } else {
                         long baseRowCount = base.size();
-                        if (baseRowCount > -1L) {//don't want to cause a pass-through whole data set
+                        if (baseRowCount > -1L) { // we don't want to cause a pass-through whole data set
                             limit = Math.max(0, Math.min(baseRowCount, hi) - lo);
-                            size = limit;
+                            areRowsCounted = true;
                         } else {
-                            limit = Math.max(0, hi - lo);//doesn't handle hi exceeding number of rows
-                            size = limit;
+                            limit = Math.max(0, hi - lo); // doesn't handle hi exceeding number of rows
+                            areRowsCounted = false;
                         }
-                    }
+                        size = limit;
 
-                    if (lo > 0 && limit > 0) {
-                        skipTo(lo);
+                        if (lo > 0 && limit > 0) {
+                            skipRows(lo);
+                        }
                     }
                 }
             }
         }
 
-        private long countRows() {
-            long count = base.size();
-            if (count > -1L) {
-                return count;
+        private void countRows() {
+            if (rowCount == -1) {
+                rowCount = base.size();
+                if (rowCount > -1) {
+                    areRowsCounted = true;
+                    return;
+                }
+                rowCount = 0;
             }
 
-            count = 0L;
-            while (base.hasNext()) {
-                count++;
+            if (!areRowsCounted) {
+                base.calculateSize(circuitBreaker, counter);
+                rowCount = counter.get();
+                areRowsCounted = true;
+                counter.clear();
             }
-            return count;
         }
 
-        public void skipTo(long rowCount) {
-            base.skipTo(Math.max(0, rowCount));
+        private void skipRows(long rowCount) {
+            if (skipToRows == -1) {
+                skipToRows = Math.max(0, rowCount);
+                counter.set(skipToRows);
+                base.toTop();
+            }
+            if (skipToRows > 0) {
+                base.skipRows(counter);
+                skipToRows = 0;
+                counter.clear();
+            }
         }
     }
 }

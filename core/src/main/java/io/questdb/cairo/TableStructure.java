@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,19 +25,20 @@
 package io.questdb.cairo;
 
 public interface TableStructure {
+
     int getColumnCount();
 
     CharSequence getColumnName(int columnIndex);
 
     int getColumnType(int columnIndex);
 
-    long getColumnHash(int columnIndex);
-
     int getIndexBlockCapacity(int columnIndex);
 
-    boolean isIndexed(int columnIndex);
+    int getMaxUncommittedRows();
 
-    boolean isSequential(int columnIndex);
+    long getMetadataVersion();
+
+    long getO3MaxLag();
 
     int getPartitionBy();
 
@@ -49,7 +50,19 @@ public interface TableStructure {
 
     int getTimestampIndex();
 
-    int getMaxUncommittedRows();
+    /**
+     * Returns the time-to-live (TTL) of the data in this table: if positive,
+     * it's in hours; if negative, it's in months (and the actual value is positive).
+     * Zero means "no TTL".
+     */
+    default int getTtlHoursOrMonths() {
+        // TTL disabled by default
+        return 0;
+    }
 
-    long getCommitLag();
+    boolean isDedupKey(int columnIndex);
+
+    boolean isIndexed(int columnIndex);
+
+    boolean isWalEnabled();
 }

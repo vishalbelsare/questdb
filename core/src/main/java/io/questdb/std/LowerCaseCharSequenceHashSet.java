@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -68,19 +68,35 @@ public class LowerCaseCharSequenceHashSet extends AbstractLowerCaseCharSequenceH
         return keyIndex(key) < 0;
     }
 
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        LowerCaseCharSequenceHashSet that = (LowerCaseCharSequenceHashSet) o;
+        if (size() != that.size()) {
+            return false;
+        }
+        for (CharSequence key : keys) {
+            if (key != null && that.excludes(key)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public int hashCode() {
+        int hashCode = 0;
+        for (int i = 0, n = keys.length; i < n; i++) {
+            if (keys[i] != noEntryKey) {
+                hashCode += Chars.hashCode(keys[i]);
+            }
+        }
+        return hashCode;
+    }
+
     public CharSequence keyAt(int index) {
         return keys[-index - 1];
-    }
-
-    @Override
-    protected void erase(int index) {
-        keys[index] = noEntryKey;
-    }
-
-    @Override
-    protected void move(int from, int to) {
-        keys[to] = keys[from];
-        erase(from);
     }
 
     private void rehash() {
@@ -99,5 +115,16 @@ public class LowerCaseCharSequenceHashSet extends AbstractLowerCaseCharSequenceH
                 keys[keyIndex(key)] = key;
             }
         }
+    }
+
+    @Override
+    protected void erase(int index) {
+        keys[index] = noEntryKey;
+    }
+
+    @Override
+    protected void move(int from, int to) {
+        keys[to] = keys[from];
+        erase(from);
     }
 }

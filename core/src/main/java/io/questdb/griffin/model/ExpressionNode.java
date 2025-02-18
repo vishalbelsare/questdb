@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,34 +25,44 @@
 package io.questdb.griffin.model;
 
 import io.questdb.griffin.OperatorExpression;
-import io.questdb.std.*;
+import io.questdb.griffin.OperatorRegistry;
+import io.questdb.std.Chars;
+import io.questdb.std.Mutable;
+import io.questdb.std.Numbers;
+import io.questdb.std.ObjList;
+import io.questdb.std.ObjectFactory;
+import io.questdb.std.ObjectPool;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.Objects;
 
 public class ExpressionNode implements Mutable, Sinkable {
 
-    public final static ExpressionNodeFactory FACTORY = new ExpressionNodeFactory();
-    public static final int OPERATION = 1;
+    public static final int ARRAY_ACCESS = 9;
+    public static final int BIND_VARIABLE = 6;
     public static final int CONSTANT = 2;
+    public static final int CONTROL = 16;
+    public static final ExpressionNodeFactory FACTORY = new ExpressionNodeFactory();
+    public static final int FUNCTION = 8;
     public static final int LITERAL = 4;
     public static final int MEMBER_ACCESS = 5;
-    public static final int BIND_VARIABLE = 6;
-    public static final int FUNCTION = 8;
-    public static final int ARRAY_ACCESS = 9;
-    public static final int CONTROL = 16;
-    public static final int SET_OPERATION = 32;
+    public static final int OPERATION = 1;
     public static final int QUERY = 65;
+    public static final int SET_OPERATION = 32;
     public static final int UNKNOWN = 0;
     public final ObjList<ExpressionNode> args = new ObjList<>(4);
-    public CharSequence token;
-    public QueryModel queryModel;
-    public int precedence;
-    public int position;
-    public ExpressionNode lhs;
-    public ExpressionNode rhs;
-    public int type;
-    public int paramCount;
-    public int intrinsicValue = IntrinsicModel.UNDEFINED;
     public boolean innerPredicate = false;
+    public int intrinsicValue = IntrinsicModel.UNDEFINED;
+    public ExpressionNode lhs;
+    public int paramCount;
+    public int position;
+    public int precedence;
+    public QueryModel queryModel;
+    public ExpressionNode rhs;
+    public CharSequence token;
+    public int type;
 
     // IMPORTANT: update deepClone method after adding a new field
     private ExpressionNode() {
@@ -66,7 +76,8 @@ public class ExpressionNode implements Mutable, Sinkable {
         if (a == null || b == null || a.type != b.type) {
             return false;
         }
-        return Chars.equals(a.token, b.token) && compareArgsExact(a, b);
+        return (a.type == FUNCTION || a.type == LITERAL ? Chars.equalsIgnoreCase(a.token, b.token) : Chars.equals(a.token, b.token)) &&
+                compareArgsExact(a, b);
     }
 
     public static boolean compareNodesGroupBy(
@@ -83,7 +94,6 @@ public class ExpressionNode implements Mutable, Sinkable {
         }
 
         if (!Chars.equals(groupByExpr.token, columnExpr.token)) {
-
             int index = translatingModel.getAliasToColumnMap().keyIndex(columnExpr.token);
             if (index > -1) {
                 return false;
@@ -97,11 +107,9 @@ public class ExpressionNode implements Mutable, Sinkable {
             }
 
             int dot = Chars.indexOf(tok, '.');
-
-            if (dot > -1 &&
-                    translatingModel.getAliasIndex(tok, 0, dot) > -1
-                    && Chars.equals(qcTok, tok, dot + 1, tok.length())
-            ) {
+            if (dot > -1
+                    && translatingModel.getModelAliasIndex(tok, 0, dot) > -1
+                    && Chars.equals(qcTok, tok, dot + 1, tok.length())) {
                 return compareArgs(groupByExpr, columnExpr, translatingModel);
             }
 
@@ -109,6 +117,27 @@ public class ExpressionNode implements Mutable, Sinkable {
         }
 
         return compareArgs(groupByExpr, columnExpr, translatingModel);
+    }
+
+    public static ExpressionNode deepClone(final ObjectPool<ExpressionNode> pool, final ExpressionNode node) {
+        if (node == null) {
+            return null;
+        }
+        ExpressionNode copy = pool.next();
+        for (int i = 0, n = node.args.size(); i < n; i++) {
+            copy.args.add(ExpressionNode.deepClone(pool, node.args.get(i)));
+        }
+        copy.token = node.token;
+        copy.queryModel = node.queryModel;
+        copy.precedence = node.precedence;
+        copy.position = node.position;
+        copy.lhs = ExpressionNode.deepClone(pool, node.lhs);
+        copy.rhs = ExpressionNode.deepClone(pool, node.rhs);
+        copy.type = node.type;
+        copy.paramCount = node.paramCount;
+        copy.intrinsicValue = node.intrinsicValue;
+        copy.innerPredicate = node.innerPredicate;
+        return copy;
     }
 
     public void clear() {
@@ -125,10 +154,46 @@ public class ExpressionNode implements Mutable, Sinkable {
         innerPredicate = false;
     }
 
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        ExpressionNode that = (ExpressionNode) o;
+        return precedence == that.precedence
+                && position == that.position
+                && type == that.type
+                && paramCount == that.paramCount
+                && intrinsicValue == that.intrinsicValue
+                && innerPredicate == that.innerPredicate
+                && Objects.equals(args, that.args)
+                && Objects.equals(token, that.token)
+                && Objects.equals(queryModel, that.queryModel)
+                && Objects.equals(lhs, that.lhs)
+                && Objects.equals(rhs, that.rhs);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(args, token, queryModel, precedence, position, lhs, rhs, type, paramCount, intrinsicValue, innerPredicate);
+    }
+
+    public boolean isWildcard() {
+        return type == LITERAL && Chars.endsWith(token, '*');
+    }
+
+    public boolean noLeafs() {
+        return lhs == null || rhs == null;
+    }
+
     public ExpressionNode of(int type, CharSequence token, int precedence, int position) {
         clear();
         // override literal with bind variable
-        if (type == LITERAL && token != null && (token.charAt(0) == '$' || token.charAt(0) == ':')) {
+        if (
+                type == LITERAL
+                        && token != null
+                        && token.length() != 0
+                        && ((token.charAt(0) == '$' && Numbers.isDecimal(token, 1)) || token.charAt(0) == ':')
+        ) {
             this.type = BIND_VARIABLE;
         } else {
             this.type = type;
@@ -140,66 +205,68 @@ public class ExpressionNode implements Mutable, Sinkable {
     }
 
     @Override
-    public void toSink(CharSink sink) {
+    public void toSink(@NotNull CharSink<?> sink) {
+        // note: it's safe to take any registry (new or old) because we don't use precedence here
+        OperatorRegistry registry = OperatorExpression.getRegistry();
         switch (paramCount) {
             case 0:
                 if (queryModel != null) {
-                    sink.put('(').put(queryModel).put(')');
+                    sink.putAscii('(').put(queryModel).putAscii(')');
                 } else {
                     sink.put(token);
                     if (type == FUNCTION) {
-                        sink.put("()");
+                        sink.putAscii("()");
                     }
                 }
                 break;
             case 1:
                 sink.put(token);
-                sink.put('(');
-                rhs.toSink(sink);
-                sink.put(')');
+                sink.putAscii('(');
+                toSink(sink, rhs);
+                sink.putAscii(')');
                 break;
             case 2:
-                if (OperatorExpression.isOperator(token)) {
-                    lhs.toSink(sink);
-                    sink.put(' ');
+                if (registry.isOperator(token)) {
+                    toSink(sink, lhs);
+                    sink.putAscii(' ');
                     sink.put(token);
-                    sink.put(' ');
-                    rhs.toSink(sink);
+                    sink.putAscii(' ');
+                    toSink(sink, rhs);
                 } else {
                     sink.put(token);
-                    sink.put('(');
-                    lhs.toSink(sink);
-                    sink.put(',');
-                    rhs.toSink(sink);
-                    sink.put(')');
+                    sink.putAscii('(');
+                    toSink(sink, lhs);
+                    sink.putAscii(',');
+                    toSink(sink, rhs);
+                    sink.putAscii(')');
                 }
                 break;
             default:
                 int n = args.size();
-                if (OperatorExpression.isOperator(token) && n > 0) {
+                if (registry.isOperator(token) && n > 0) {
                     // special case for "in"
-                    args.getQuick(n - 1).toSink(sink);
-                    sink.put(' ');
+                    toSink(sink, args.getQuick(n - 1));
+                    sink.putAscii(' ');
                     sink.put(token);
-                    sink.put(' ');
-                    sink.put('(');
+                    sink.putAscii(' ');
+                    sink.putAscii('(');
                     for (int i = n - 2; i > -1; i--) {
                         if (i < n - 2) {
-                            sink.put(',');
+                            sink.putAscii(',');
                         }
-                        args.getQuick(i).toSink(sink);
+                        toSink(sink, args.getQuick(i));
                     }
-                    sink.put(')');
+                    sink.putAscii(')');
                 } else {
                     sink.put(token);
-                    sink.put('(');
+                    sink.putAscii('(');
                     for (int i = n - 1; i > -1; i--) {
                         if (i < n - 1) {
-                            sink.put(',');
+                            sink.putAscii(',');
                         }
-                        args.getQuick(i).toSink(sink);
+                        toSink(sink, args.getQuick(i));
                     }
-                    sink.put(')');
+                    sink.putAscii(')');
                 }
                 break;
         }
@@ -250,31 +317,18 @@ public class ExpressionNode implements Mutable, Sinkable {
         return true;
     }
 
+    private static void toSink(CharSink<?> sink, ExpressionNode e) {
+        if (e == null) {
+            sink.putAscii("null");
+        } else {
+            e.toSink(sink);
+        }
+    }
+
     public static final class ExpressionNodeFactory implements ObjectFactory<ExpressionNode> {
         @Override
         public ExpressionNode newInstance() {
             return new ExpressionNode();
         }
-    }
-
-    public static ExpressionNode deepClone(final ObjectPool<ExpressionNode> pool, final ExpressionNode node) {
-        if (node == null) {
-            return null;
-        }
-        ExpressionNode copy = pool.next();
-        for (int i = 0, n = node.args.size(); i < n; i++) {
-            copy.args.add(ExpressionNode.deepClone(pool, node.args.get(i)));
-        }
-        copy.token = node.token;
-        copy.queryModel = node.queryModel;
-        copy.precedence = node.precedence;
-        copy.position = node.position;
-        copy.lhs = ExpressionNode.deepClone(pool, node.lhs);
-        copy.rhs = ExpressionNode.deepClone(pool, node.rhs);
-        copy.type = node.type;
-        copy.paramCount = node.paramCount;
-        copy.intrinsicValue = node.intrinsicValue;
-        copy.innerPredicate = node.innerPredicate;
-        return copy;
     }
 }

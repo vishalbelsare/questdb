@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,25 +24,32 @@
 
 package io.questdb.cairo.vm.api;
 
+import io.questdb.cairo.vm.Vm;
 import io.questdb.std.FilesFacade;
 import io.questdb.std.str.LPSZ;
 
-//mapped appendable 
+// mapped appendable
 public interface MemoryMA extends MemoryM, MemoryA {
 
-    void close(boolean truncate);
+    default void close(boolean truncate) {
+        close(truncate, Vm.TRUNCATE_TO_PAGE);
+    }
+
+    void close(boolean truncate, byte truncateMode);
 
     long getAppendAddress();
 
     long getAppendAddressSize();
-
-    void sync(boolean async);
 
     void of(FilesFacade ff, LPSZ name, long extendSegmentSize, int memoryTag, long opts);
 
     default void setSize(long size) {
         jumpTo(size);
     }
+
+    void switchTo(FilesFacade ff, long fd, long extendSegmentSize, long offset, boolean truncate, byte truncateMode);
+
+    void sync(boolean async);
 
     default void toTop() {
         jumpTo(0);

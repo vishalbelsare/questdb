@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,10 +24,14 @@
 
 package io.questdb.std;
 
+import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import org.jetbrains.annotations.NotNull;
+
 import java.util.Arrays;
 
 
-public class IntHashSet extends AbstractIntHashSet {
+public class IntHashSet extends AbstractIntHashSet implements Sinkable {
 
     private static final int MIN_INITIAL_CAPACITY = 16;
     private final IntList list;
@@ -36,7 +40,6 @@ public class IntHashSet extends AbstractIntHashSet {
         this(MIN_INITIAL_CAPACITY);
     }
 
-    @SuppressWarnings("CopyConstructorMissesField")
     public IntHashSet(IntHashSet that) {
         this(that.capacity, that.loadFactor, noEntryKey);
         addAll(that);
@@ -48,14 +51,14 @@ public class IntHashSet extends AbstractIntHashSet {
 
     public IntHashSet(int initialCapacity, double loadFactor, int noKeyValue) {
         super(initialCapacity, loadFactor, noKeyValue);
-        this.list = new IntList(free);
+        list = new IntList(free);
         clear();
     }
 
     /**
      * Adds key to hash set preserving key uniqueness.
      *
-     * @param key immutable sequence of characters.
+     * @param key key to be added.
      * @return false if key is already in the set and true otherwise.
      */
     public boolean add(int key) {
@@ -88,10 +91,47 @@ public class IntHashSet extends AbstractIntHashSet {
         list.clear();
     }
 
-    public boolean excludes(int key) {
-        return keyIndex(key) > -1;
+    public boolean contains(int key) {
+        return keyIndex(key) < 0;
     }
 
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        IntHashSet that = (IntHashSet) o;
+        if (size() != that.size()) {
+            return false;
+        }
+        for (int i = 0, n = list.size(); i < n; i++) {
+            int key = list.getQuick(i);
+            if (key != noEntryKeyValue && that.excludes(key)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public int get(int index) {
+        return list.getQuick(index);
+    }
+
+    public int getLast() {
+        return list.getLast();
+    }
+
+    @Override
+    public int hashCode() {
+        int hashCode = 0;
+        for (int i = 0, n = keys.length; i < n; i++) {
+            if (keys[i] != noEntryKeyValue) {
+                hashCode += keys[i];
+            }
+        }
+        return hashCode;
+    }
+
+    @Override
     public int remove(int key) {
         int keyIndex = keyIndex(key);
         if (keyIndex < 0) {
@@ -101,12 +141,38 @@ public class IntHashSet extends AbstractIntHashSet {
         return -1;
     }
 
+    @Override
     public void removeAt(int index) {
         if (index < 0) {
             int index1 = -index - 1;
             int key = keys[index1];
             super.removeAt(index);
             list.remove(key);
+        }
+    }
+
+    @Override
+    public void toSink(@NotNull CharSink<?> sink) {
+        list.toSink(sink, noEntryKeyValue);
+    }
+
+    @Override
+    public String toString() {
+        return list.toString();
+    }
+
+    private void rehash() {
+        int newCapacity = capacity * 2;
+        free = capacity = newCapacity;
+        int len = Numbers.ceilPow2((int) (newCapacity / loadFactor));
+        keys = new int[len];
+        Arrays.fill(keys, noEntryKeyValue);
+        mask = len - 1;
+        int n = list.size();
+        free -= n;
+        for (int i = 0; i < n; i++) {
+            final int key = list.getQuick(i);
+            keys[keyIndex(key)] = key;
         }
     }
 
@@ -119,37 +185,5 @@ public class IntHashSet extends AbstractIntHashSet {
     protected void move(int from, int to) {
         keys[to] = keys[from];
         erase(from);
-    }
-
-    public boolean contains(int key) {
-        return keyIndex(key) < 0;
-    }
-
-    public int get(int index) {
-        return list.getQuick(index);
-    }
-
-    public int getLast() {
-        return list.getLast();
-    }
-
-    @Override
-    public String toString() {
-        return list.toString();
-    }
-
-    private void rehash() {
-        int newCapacity = capacity * 2;
-        free = capacity = newCapacity;
-        int len = Numbers.ceilPow2((int) (newCapacity / loadFactor));
-        this.keys = new int[len];
-        Arrays.fill(keys, noEntryKeyValue);
-        mask = len - 1;
-        int n = list.size();
-        free -= n;
-        for (int i = 0; i < n; i++) {
-            final int key = list.getQuick(i);
-            keys[keyIndex(key)] = key;
-        }
     }
 }

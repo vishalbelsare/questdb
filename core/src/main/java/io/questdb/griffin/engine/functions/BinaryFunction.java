@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ package io.questdb.griffin.engine.functions;
 
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.SymbolTableSource;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 
@@ -38,9 +39,25 @@ public interface BinaryFunction extends Function {
     }
 
     @Override
+    default void cursorClosed() {
+        getLeft().cursorClosed();
+        getRight().cursorClosed();
+    }
+
+    Function getLeft();
+
+    Function getRight();
+
+    @Override
     default void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
         getLeft().init(symbolTableSource, executionContext);
         getRight().init(symbolTableSource, executionContext);
+    }
+
+    @Override
+    default void initCursor() {
+        getLeft().initCursor();
+        getRight().initCursor();
     }
 
     @Override
@@ -48,16 +65,17 @@ public interface BinaryFunction extends Function {
         return getLeft().isConstant() && getRight().isConstant();
     }
 
-    @Override
-    default void toTop() {
-        getLeft().toTop();
-        getRight().toTop();
+    // used in generic toSink implementation
+    default boolean isOperator() {
+        return false;
     }
 
-    Function getLeft();
+    @Override
+    default boolean isThreadSafe() {
+        return getLeft().isThreadSafe() && getRight().isThreadSafe();
+    }
 
-    Function getRight();
-
+    @Override
     default boolean isRuntimeConstant() {
         final Function l = getLeft();
         final Function r = getRight();
@@ -65,7 +83,22 @@ public interface BinaryFunction extends Function {
     }
 
     @Override
-    default boolean isReadThreadSafe() {
-        return getLeft().isReadThreadSafe() && getRight().isReadThreadSafe();
+    default boolean supportsParallelism() {
+        return getLeft().supportsParallelism() && getRight().supportsParallelism();
+    }
+
+    @Override
+    default void toPlan(PlanSink sink) {
+        if (isOperator()) {
+            sink.val(getLeft()).val(getName()).val(getRight());
+        } else {
+            sink.val(getName()).val('(').val(getLeft()).val(',').val(getRight()).val(')');
+        }
+    }
+
+    @Override
+    default void toTop() {
+        getLeft().toTop();
+        getRight().toTop();
     }
 }

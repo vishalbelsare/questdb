@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ package io.questdb.griffin.engine.functions.bind;
 
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.ScalarFunction;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.DateFunction;
 import io.questdb.std.Mutable;
 import io.questdb.std.Numbers;
@@ -35,7 +36,7 @@ class DateBindVariable extends DateFunction implements ScalarFunction, Mutable {
 
     @Override
     public void clear() {
-        this.value = Numbers.LONG_NaN;
+        this.value = Numbers.LONG_NULL;
     }
 
     @Override
@@ -44,12 +45,17 @@ class DateBindVariable extends DateFunction implements ScalarFunction, Mutable {
     }
 
     @Override
+    public boolean isThreadSafe() {
+        return true;
+    }
+
+    @Override
     public boolean isRuntimeConstant() {
         return true;
     }
 
     @Override
-    public boolean isReadThreadSafe() {
-        return true;
+    public void toPlan(PlanSink sink) {
+        sink.val("?::date");
     }
 }

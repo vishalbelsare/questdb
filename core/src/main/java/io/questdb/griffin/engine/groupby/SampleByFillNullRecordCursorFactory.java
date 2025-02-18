@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import io.questdb.cairo.ListColumnFilter;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.griffin.engine.functions.constants.*;
@@ -38,14 +39,14 @@ import io.questdb.std.*;
 import org.jetbrains.annotations.NotNull;
 
 public class SampleByFillNullRecordCursorFactory extends AbstractSampleByFillRecordCursorFactory {
-    private final AbstractNoRecordSampleByCursor cursor;
+    private final SampleByFillValueRecordCursor cursor;
 
     public SampleByFillNullRecordCursorFactory(
+            @Transient @NotNull BytecodeAssembler asm,
             CairoConfiguration configuration,
             RecordCursorFactory base,
             @NotNull TimestampSampler timestampSampler,
             @Transient @NotNull ListColumnFilter listColumnFilter,
-            @Transient @NotNull BytecodeAssembler asm,
             @Transient @NotNull ArrayColumnTypes keyTypes,
             @Transient @NotNull ArrayColumnTypes valueTypes,
             RecordMetadata groupByMetadata,
@@ -56,14 +57,17 @@ public class SampleByFillNullRecordCursorFactory extends AbstractSampleByFillRec
             Function timezoneNameFunc,
             int timezoneNameFuncPos,
             Function offsetFunc,
-            int offsetFuncPos
+            int offsetFuncPos,
+            Function sampleFromFunc,
+            int sampleFromFuncPos,
+            Function sampleToFunc,
+            int sampleToFuncPos
     ) throws SqlException {
-
         super(
+                asm,
                 configuration,
                 base,
                 listColumnFilter,
-                asm,
                 keyTypes,
                 valueTypes,
                 groupByMetadata,
@@ -71,10 +75,13 @@ public class SampleByFillNullRecordCursorFactory extends AbstractSampleByFillRec
                 recordFunctions
         );
         try {
-            this.cursor = new SampleByFillValueRecordCursor(
+            final GroupByFunctionsUpdater updater = GroupByFunctionsUpdaterFactory.getInstance(asm, groupByFunctions);
+            cursor = new SampleByFillValueRecordCursor(
+                    configuration,
                     map,
                     mapSink,
                     groupByFunctions,
+                    updater,
                     recordFunctions,
                     createPlaceholderFunctions(recordFunctions, recordFunctionPositions),
                     timestampIndex,
@@ -82,7 +89,11 @@ public class SampleByFillNullRecordCursorFactory extends AbstractSampleByFillRec
                     timezoneNameFunc,
                     timezoneNameFuncPos,
                     offsetFunc,
-                    offsetFuncPos
+                    offsetFuncPos,
+                    sampleFromFunc,
+                    sampleFromFuncPos,
+                    sampleToFunc,
+                    sampleToFuncPos
             );
         } catch (Throwable e) {
             Misc.freeObjList(recordFunctions);
@@ -91,27 +102,26 @@ public class SampleByFillNullRecordCursorFactory extends AbstractSampleByFillRec
         }
     }
 
-    @NotNull
-    static ObjList<Function> createPlaceholderFunctions(
-            ObjList<Function> recordFunctions,
-            IntList recordFunctionPositions
-    ) throws SqlException {
-        final ObjList<Function> placeholderFunctions = new ObjList<>();
-        for (int i = 0, n = recordFunctions.size(); i < n; i++) {
-            Function function = recordFunctions.getQuick(i);
-            if (function instanceof GroupByFunction) {
-                placeholderFunctions.add(createPlaceHolderFunction(recordFunctionPositions, i, function.getType()));
-            } else {
-                placeholderFunctions.add(function);
-            }
-        }
-        return placeholderFunctions;
+    @Override
+    public AbstractNoRecordSampleByCursor getRawCursor() {
+        return cursor;
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Sample By");
+        sink.attr("fill").val("null");
+        sink.optAttr("keys", GroupByRecordCursorFactory.getKeys(recordFunctions, getMetadata()));
+        sink.optAttr("values", cursor.groupByFunctions, true);
+        sink.child(base);
     }
 
     static Function createPlaceHolderFunction(IntList recordFunctionPositions, int index, int type) throws SqlException {
         switch (ColumnType.tagOf(type)) {
             case ColumnType.INT:
                 return IntConstant.NULL;
+            case ColumnType.IPv4:
+                return IPv4Constant.NULL;
             case ColumnType.LONG:
                 return LongConstant.NULL;
             case ColumnType.FLOAT:
@@ -130,13 +140,29 @@ public class SampleByFillNullRecordCursorFactory extends AbstractSampleByFillRec
                 return GeoIntConstant.NULL;
             case ColumnType.GEOLONG:
                 return GeoLongConstant.NULL;
+            case ColumnType.UUID:
+                return UuidConstant.NULL;
+            case ColumnType.TIMESTAMP:
+                return TimestampConstant.NULL;
             default:
                 throw SqlException.$(recordFunctionPositions.getQuick(index), "Unsupported type: ").put(ColumnType.nameOf(type));
         }
     }
 
-    @Override
-    public AbstractNoRecordSampleByCursor getRawCursor() {
-        return cursor;
+    @NotNull
+    static ObjList<Function> createPlaceholderFunctions(
+            ObjList<Function> recordFunctions,
+            IntList recordFunctionPositions
+    ) throws SqlException {
+        final ObjList<Function> placeholderFunctions = new ObjList<>();
+        for (int i = 0, n = recordFunctions.size(); i < n; i++) {
+            Function function = recordFunctions.getQuick(i);
+            if (function instanceof GroupByFunction) {
+                placeholderFunctions.add(createPlaceHolderFunction(recordFunctionPositions, i, function.getType()));
+            } else {
+                placeholderFunctions.add(function);
+            }
+        }
+        return placeholderFunctions;
     }
 }

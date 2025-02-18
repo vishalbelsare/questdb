@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
             long columnNameTxn,
             long unIndexedNullCount
     ) {
-        of(configuration, path, name, columnNameTxn, unIndexedNullCount, -1);
+        of(configuration, path, name, columnNameTxn, unIndexedNullCount);
     }
 
     @Override
@@ -63,6 +63,12 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
 
     /**
      * Allows reusing cursor objects, if that's possible.
+     *
+     * @param rowCursor cursor to reuse, or null
+     * @param key       key to search for
+     * @param minValue  minimum value to search for
+     * @param maxValue  maximum value to search for
+     * @return initialised cursor
      */
     public RowCursor initCursor(RowCursor rowCursor, int key, long minValue, long maxValue) {
         Cursor cursor = null;
@@ -71,12 +77,12 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
             assert cursor.owner() == this;
         }
 
-        if (key == 0 && unIndexedNullCount > 0 && minValue < unIndexedNullCount) {
+        if (key == 0 && unindexedNullCount > 0 && minValue < unindexedNullCount) {
             // we need to return some nulls and the whole set of actual index values
             if (cursor == null) {
                 cursor = new Cursor();
             }
-            cursor.of(key, 0, maxValue, keyCount, minValue, unIndexedNullCount);
+            cursor.of(key, minValue, maxValue, keyCount, minValue, unindexedNullCount);
             return cursor;
         }
 
@@ -92,14 +98,15 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
     }
 
     private class Cursor implements RowCursor {
+        protected long next;
         protected long position;
         protected long valueCount;
-        protected long next;
+        private long maxValue;
+        private long minValue;
+        private long nullCount;
+        private long nullPos;
         private long valueBlockOffset;
         private final BitmapIndexUtils.ValueBlockSeeker SEEKER = this::seekValue;
-        private long maxValue;
-        private long nullPos;
-        private long nullCount;
 
         @Override
         public boolean hasNext() {
@@ -133,7 +140,7 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
 
         @Override
         public long next() {
-            return next;
+            return next - minValue;
         }
 
         private long getValueCellIndex(long absoluteValueIndex) {
@@ -147,6 +154,15 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
             }
             valueBlockOffset = nextBlock;
             return true;
+        }
+
+        private ConcurrentBitmapIndexFwdReader owner() {
+            return ConcurrentBitmapIndexFwdReader.this;
+        }
+
+        private void seekValue(long count, long offset) {
+            this.position = count;
+            this.valueBlockOffset = offset;
         }
 
         void of(int key, long minValue, long maxValue, long keyCount, long nullPos, long nullCount) {
@@ -164,7 +180,7 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
                 // should these values do not match.
                 long valueCount;
                 long valueBlockOffset;
-                final long deadline = clock.getTicks() + spinLockTimeoutUs;
+                final long deadline = clock.getTicks() + spinLockTimeoutMs;
                 while (true) {
                     valueCount = keyMem.getLong(offset + BitmapIndexUtils.KEY_ENTRY_OFFSET_VALUE_COUNT);
 
@@ -179,8 +195,8 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
                     }
 
                     if (clock.getTicks() > deadline) {
-                        LOG.error().$(INDEX_CORRUPT).$(" [timeout=").$(spinLockTimeoutUs).utf8("μs, key=").$(key).$(", offset=").$(offset).$(']').$();
-                        throw CairoException.instance(0).put(INDEX_CORRUPT);
+                        LOG.error().$(INDEX_CORRUPT).$(" [timeout=").$(spinLockTimeoutMs).utf8("ms, key=").$(key).$(", offset=").$(offset).$(']').$();
+                        throw CairoException.critical(0).put(INDEX_CORRUPT);
                     }
                 }
 
@@ -193,17 +209,9 @@ public class ConcurrentBitmapIndexFwdReader extends AbstractIndexReader {
                     seekValue(valueCount, valueBlockOffset);
                 }
 
+                this.minValue = minValue;
                 this.maxValue = maxValue;
             }
-        }
-
-        private void seekValue(long count, long offset) {
-            this.position = count;
-            this.valueBlockOffset = offset;
-        }
-
-        private ConcurrentBitmapIndexFwdReader owner() {
-            return ConcurrentBitmapIndexFwdReader.this;
         }
     }
 }

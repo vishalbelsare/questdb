@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.SymbolTable;
 import io.questdb.cairo.sql.SymbolTableSource;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.SymbolFunction;
@@ -50,7 +51,7 @@ public class CastLongToSymbolFunctionFactory implements FunctionFactory {
     public Function newInstance(int position, ObjList<Function> args, IntList argPositions, CairoConfiguration configuration, SqlExecutionContext sqlExecutionContext) {
         final Function arg = args.getQuick(0);
         if (arg.isConstant()) {
-            final StringSink sink = Misc.getThreadLocalBuilder();
+            final StringSink sink = Misc.getThreadLocalSink();
             sink.put(arg.getLong(null));
             return SymbolConstant.newInstance(sink);
         }
@@ -75,9 +76,28 @@ public class CastLongToSymbolFunctionFactory implements FunctionFactory {
         }
 
         @Override
+        public int getInt(Record rec) {
+            final long value = arg.getLong(rec);
+            if (value == Numbers.LONG_NULL) {
+                return SymbolTable.VALUE_IS_NULL;
+            }
+
+            final int keyIndex = symbolTableShortcut.keyIndex(value);
+            if (keyIndex < 0) {
+                return symbolTableShortcut.valueAt(keyIndex) - 1;
+            }
+
+            symbolTableShortcut.putAt(keyIndex, value, next);
+            sink.clear();
+            sink.put(value);
+            symbols.add(Chars.toString(sink));
+            return next++ - 1;
+        }
+
+        @Override
         public CharSequence getSymbol(Record rec) {
             final long value = arg.getLong(rec);
-            if (value == Numbers.LONG_NaN) {
+            if (value == Numbers.LONG_NULL) {
                 return null;
             }
 
@@ -100,46 +120,17 @@ public class CastLongToSymbolFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public CharSequence valueOf(int symbolKey) {
-            return symbols.getQuick(TableUtils.toIndexKey(symbolKey));
-        }
-
-        @Override
-        public CharSequence valueBOf(int key) {
-            return valueOf(key);
-        }
-
-        @Override
-        public int getInt(Record rec) {
-            final long value = arg.getLong(rec);
-            if (value == Numbers.LONG_NaN) {
-                return SymbolTable.VALUE_IS_NULL;
-            }
-
-            final int keyIndex = symbolTableShortcut.keyIndex(value);
-            if (keyIndex < 0) {
-                return symbolTableShortcut.valueAt(keyIndex) - 1;
-            }
-
-            symbolTableShortcut.putAt(keyIndex, value, next);
-            sink.clear();
-            sink.put(value);
-            symbols.add(Chars.toString(sink));
-            return next++ - 1;
-        }
-
-        @Override
-        public boolean isSymbolTableStatic() {
-            return false;
-        }
-
-        @Override
         public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
             arg.init(symbolTableSource, executionContext);
             symbolTableShortcut.clear();
             symbols.clear();
             symbols.add(null);
             next = 1;
+        }
+
+        @Override
+        public boolean isSymbolTableStatic() {
+            return false;
         }
 
         @Override
@@ -151,6 +142,21 @@ public class CastLongToSymbolFunctionFactory implements FunctionFactory {
             copy.symbols.addAll(this.symbols);
             copy.next = this.next;
             return copy;
+        }
+
+        @Override
+        public void toPlan(PlanSink sink) {
+            sink.val(arg).val("::symbol");
+        }
+
+        @Override
+        public CharSequence valueBOf(int key) {
+            return valueOf(key);
+        }
+
+        @Override
+        public CharSequence valueOf(int symbolKey) {
+            return symbols.getQuick(TableUtils.toIndexKey(symbolKey));
         }
     }
 }

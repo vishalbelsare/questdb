@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,49 +24,50 @@
 
 package io.questdb.cutlass.line;
 
-import io.questdb.log.Log;
-import io.questdb.log.LogFactory;
-import io.questdb.network.NetworkError;
+import io.questdb.cutlass.line.udp.UdpLineChannel;
 import io.questdb.network.NetworkFacade;
+import io.questdb.network.NetworkFacadeImpl;
+import io.questdb.std.datetime.microtime.Timestamps;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 public class LineUdpSender extends AbstractLineSender {
 
-    private static final Log LOG = LogFactory.getLog(LineUdpSender.class);
-
     public LineUdpSender(int interfaceIPv4Address, int sendToIPv4Address, int sendToPort, int bufferCapacity, int ttl) {
-        super(interfaceIPv4Address, sendToIPv4Address, sendToPort, bufferCapacity, ttl, LOG);
+        this(NetworkFacadeImpl.INSTANCE, interfaceIPv4Address, sendToIPv4Address, sendToPort, bufferCapacity, ttl);
     }
 
     public LineUdpSender(NetworkFacade nf, int interfaceIPv4Address, int sendToIPv4Address, int sendToPort, int capacity, int ttl) {
-        super(nf, interfaceIPv4Address, sendToIPv4Address, sendToPort, capacity, ttl, LOG);
+        super(new UdpLineChannel(nf, interfaceIPv4Address, sendToIPv4Address, sendToPort, ttl), capacity);
     }
 
     @Override
-    protected long createSocket(int interfaceIPv4Address, int ttl, long sockaddr) throws NetworkError {
-        long fd = nf.socketUdp();
-
-        if (fd == -1) {
-            throw NetworkError.instance(nf.errno()).put("could not create UDP socket");
-        }
-
-        if (nf.setMulticastInterface(fd, interfaceIPv4Address) != 0) {
-            final int errno = nf.errno();
-            nf.close(fd, LOG);
-            throw NetworkError.instance(errno).put("could not bind to ").ip(interfaceIPv4Address);
-        }
-
-        if (nf.setMulticastTtl(fd, ttl) != 0) {
-            final int errno = nf.errno();
-            nf.close(fd, LOG);
-            throw NetworkError.instance(errno).put("could not set ttl [fd=").put(fd).put(", ttl=").put(ttl).put(']');
-        }
-        return fd;
+    public final void at(long timestamp, ChronoUnit unit) {
+        putAsciiInternal(' ').put(timestamp * unitToNanos(unit));
+        atNow();
     }
 
+    @Override
+    public final void at(Instant timestamp) {
+        putAsciiInternal(' ').put(timestamp.getEpochSecond() * Timestamps.SECOND_NANOS + timestamp.getNano());
+        atNow();
+    }
 
-    protected void sendToSocket(long fd, long lo, long sockaddr, int len) throws NetworkError {
-        if (nf.sendTo(fd, lo, len, sockaddr) != len) {
-            throw NetworkError.instance(nf.errno()).put("send error");
-        }
+    @Override
+    public void cancelRow() {
+        throw new LineSenderException("cancelRow() not supported by UDP transport");
+    }
+
+    @Override
+    public final AbstractLineSender timestampColumn(CharSequence name, Instant value) {
+        writeFieldName(name).put((value.getEpochSecond() * Timestamps.SECOND_NANOS + value.getNano()) / 1000);
+        return this;
+    }
+
+    @Override
+    public final AbstractLineSender timestampColumn(CharSequence name, long value, ChronoUnit unit) {
+        writeFieldName(name).put(Timestamps.toMicros(value, unit));
+        return this;
     }
 }

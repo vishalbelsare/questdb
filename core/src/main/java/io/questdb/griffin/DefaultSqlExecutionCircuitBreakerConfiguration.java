@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,10 +27,16 @@ package io.questdb.griffin;
 import io.questdb.cairo.sql.SqlExecutionCircuitBreakerConfiguration;
 import io.questdb.network.NetworkFacade;
 import io.questdb.network.NetworkFacadeImpl;
-import io.questdb.std.datetime.microtime.MicrosecondClock;
-import io.questdb.std.datetime.microtime.MicrosecondClockImpl;
+import io.questdb.std.datetime.millitime.MillisecondClock;
+import io.questdb.std.datetime.millitime.MillisecondClockImpl;
+import org.jetbrains.annotations.NotNull;
 
 public class DefaultSqlExecutionCircuitBreakerConfiguration implements SqlExecutionCircuitBreakerConfiguration {
+    @Override
+    public boolean checkConnection() {
+        return true;
+    }
+
     @Override
     public int getBufferSize() {
         return 64;
@@ -42,22 +48,22 @@ public class DefaultSqlExecutionCircuitBreakerConfiguration implements SqlExecut
     }
 
     @Override
-    public NetworkFacade getNetworkFacade() {
+    public @NotNull MillisecondClock getClock() {
+        return MillisecondClockImpl.INSTANCE;
+    }
+
+    @Override
+    public @NotNull NetworkFacade getNetworkFacade() {
         return NetworkFacadeImpl.INSTANCE;
+    }
+
+    @Override
+    public long getQueryTimeout() {
+        return Long.MAX_VALUE;
     }
 
     @Override
     public boolean isEnabled() {
         return true;
-    }
-
-    @Override
-    public MicrosecondClock getClock() {
-        return MicrosecondClockImpl.INSTANCE;
-    }
-
-    @Override
-    public long getMaxTime() {
-        return Long.MAX_VALUE;
     }
 }

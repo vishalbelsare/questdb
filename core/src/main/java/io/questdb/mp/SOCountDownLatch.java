@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -34,25 +34,25 @@ import java.util.concurrent.locks.LockSupport;
  */
 public class SOCountDownLatch implements CountDownLatchSPI {
     private static final long VALUE_OFFSET;
-
-    static {
-        VALUE_OFFSET = Unsafe.getFieldOffset(SOCountDownLatch.class, "count");
-    }
-
-    private volatile int count = 0;
-    private volatile Thread waiter = null;
+    private volatile int count;
+    private volatile Thread waiter;
 
     public SOCountDownLatch(int count) {
         this.count = count;
     }
 
     public SOCountDownLatch() {
+        // no-op
     }
 
     public void await() {
         this.waiter = Thread.currentThread();
         while (getCount() > 0) {
-            Os.pause();
+            // Don't use LockSupport.park() here.
+            // Once in a while there can be a delay between check of this.count > -count
+            // and parking and unparkWaiter() will be called before park().
+            // Limit the parking time by using Os.park() instead of LockSupport.park()
+            Os.park();
         }
     }
 
@@ -68,12 +68,13 @@ public class SOCountDownLatch implements CountDownLatchSPI {
             long elapsed = System.nanoTime() - start;
 
             if (elapsed < nanos) {
-                // this could be spurious wakeup, ignore if count is non-zero
                 if (getCount() == 0) {
                     return true;
+                } else {
+                    nanos -= elapsed;
                 }
             } else {
-                return false;
+                return getCount() == 0;
             }
         }
     }
@@ -110,5 +111,9 @@ public class SOCountDownLatch implements CountDownLatchSPI {
         if (waiter != null) {
             LockSupport.unpark(waiter);
         }
+    }
+
+    static {
+        VALUE_OFFSET = Unsafe.getFieldOffset(SOCountDownLatch.class, "count");
     }
 }

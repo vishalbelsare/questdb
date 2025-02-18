@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.SymbolTableSource;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.TimestampFunction;
@@ -54,7 +55,7 @@ public class TimestampSequenceFunctionFactory implements FunctionFactory {
     ) {
         if (args.getQuick(0).isConstant()) {
             final long start = args.getQuick(0).getTimestamp(null);
-            if (start == Numbers.LONG_NaN) {
+            if (start == Numbers.LONG_NULL) {
                 return TimestampConstant.NULL;
             }
             return new TimestampSequenceFunction(start, args.getQuick(1));
@@ -75,10 +76,6 @@ public class TimestampSequenceFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public void close() {
-        }
-
-        @Override
         public long getTimestamp(Record rec) {
             final long result = next;
             next += longIncrement.getLong(rec);
@@ -86,18 +83,24 @@ public class TimestampSequenceFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isReadThreadSafe() {
+        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
+            longIncrement.init(symbolTableSource, executionContext);
+            next = start;
+        }
+
+        @Override
+        public boolean supportsRandomAccess() {
             return false;
+        }
+
+        @Override
+        public void toPlan(PlanSink sink) {
+            sink.val("timestamp_sequence(").val(start).val(',').val(longIncrement).val(')');
         }
 
         @Override
         public void toTop() {
             next = start;
-        }
-
-        @Override
-        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
-            longIncrement.init(symbolTableSource, executionContext);
         }
     }
 
@@ -126,19 +129,25 @@ public class TimestampSequenceFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isReadThreadSafe() {
+        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
+            start.init(symbolTableSource, executionContext);
+            longIncrement.init(symbolTableSource, executionContext);
+            next = 0;
+        }
+
+        @Override
+        public boolean supportsRandomAccess() {
             return false;
+        }
+
+        @Override
+        public void toPlan(PlanSink sink) {
+            sink.val("timestamp_sequence(").val(start).val(',').val(longIncrement).val(')');
         }
 
         @Override
         public void toTop() {
             next = 0;
-        }
-
-        @Override
-        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
-            start.init(symbolTableSource, executionContext);
-            longIncrement.init(symbolTableSource, executionContext);
         }
     }
 }

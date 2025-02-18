@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -50,7 +50,6 @@ public class YearFunctionFactory implements FunctionFactory {
     }
 
     public static final class YearFunction extends IntFunction implements UnaryFunction {
-
         private final Function arg;
 
         public YearFunction(Function arg) {
@@ -66,10 +65,15 @@ public class YearFunctionFactory implements FunctionFactory {
         @Override
         public int getInt(Record rec) {
             final long value = arg.getTimestamp(rec);
-            if (value != Numbers.LONG_NaN) {
+            if (value != Numbers.LONG_NULL) {
                 return Timestamps.getYear(value);
             }
-            return Numbers.INT_NaN;
+            return Numbers.INT_NULL;
+        }
+
+        @Override
+        public String getName() {
+            return "year";
         }
     }
 }

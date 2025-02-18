@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 
 package io.questdb.cairo.vm;
 
+import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.CairoException;
 import io.questdb.cairo.TableUtils;
 import io.questdb.cairo.vm.api.MemoryCMR;
@@ -34,31 +35,70 @@ import io.questdb.std.FilesFacade;
 import io.questdb.std.MemoryTag;
 import io.questdb.std.str.LPSZ;
 
+import static io.questdb.cairo.vm.Vm.PARANOIA_MODE;
+
 //contiguous mapped readable 
 public class MemoryCMRImpl extends AbstractMemoryCR implements MemoryCMR {
     private static final Log LOG = LogFactory.getLog(MemoryCMRImpl.class);
-    private int memoryTag = MemoryTag.MMAP_DEFAULT;
+    protected long fd = -1;
+    protected int memoryTag = MemoryTag.MMAP_DEFAULT;
+    private int madviseOpts = -1;
 
     public MemoryCMRImpl(FilesFacade ff, LPSZ name, long size, int memoryTag) {
-        of(ff, name, 0, size, memoryTag);
+        of(ff, name, 0, size, memoryTag, 0);
     }
 
     public MemoryCMRImpl() {
+        // intentionally left empty
+    }
+
+    @Override
+    public long addressHi() {
+        return pageAddress + size;
+    }
+
+    @Override
+    public void changeSize(long dataSize) {
+        assert dataSize > 0 : "invalid size: " + dataSize;
+        setSize0(dataSize);
     }
 
     @Override
     public void close() {
+        clear();
         if (pageAddress != 0) {
             ff.munmap(pageAddress, size, memoryTag);
-            this.size = 0;
-            this.pageAddress = 0;
+            LOG.debug().$("unmapped [pageAddress=").$(pageAddress)
+                    .$(", size=").$(size)
+                    .$(", memoryTag=").$(memoryTag)
+                    .I$();
+            size = 0;
+            pageAddress = 0;
         }
-        if (fd != -1) {
-            ff.close(fd);
-            LOG.debug().$("closed [fd=").$(fd).$(']').$();
+        if (ff != null && ff.close(fd)) {
+            LOG.debug().$("closed [fd=").$(fd).I$();
             fd = -1;
         }
-        grownLength = 0;
+    }
+
+    @Override
+    public long detachFdClose() {
+        long fd = this.fd;
+        this.fd = -1;
+        close();
+        return fd;
+    }
+
+    @Override
+    public void extend(long newSize) {
+        if (newSize > size) {
+            setSize0(newSize);
+        }
+    }
+
+    @Override
+    public long getFd() {
+        return fd;
     }
 
     @Override
@@ -67,42 +107,36 @@ public class MemoryCMRImpl extends AbstractMemoryCR implements MemoryCMR {
     }
 
     @Override
-    public void extend(long newSize) {
-        grownLength = Math.max(newSize, grownLength);
-        if (newSize > size) {
-            setSize0(newSize);
+    public void of(FilesFacade ff, LPSZ name, long extendSegmentSize, long size, int memoryTag, long opts, int madviseOpts) {
+        this.memoryTag = memoryTag;
+        this.madviseOpts = madviseOpts;
+        try {
+            openFile(ff, name);
+            if (size < 0) {
+                size = ff.length(fd);
+                if (size < 0) {
+                    close();
+                    throw CairoException.critical(ff.errno()).put("could not get length: ").put(name);
+                }
+            }
+            assert !PARANOIA_MODE || size <= ff.length(fd) || size <= ff.length(fd); // Some tests simulate ff.length() to be 0 once.
+            map(ff, name, size);
+        } catch (Throwable e) {
+            close();
+            throw e;
         }
     }
 
     @Override
-    public void of(FilesFacade ff, LPSZ name, long extendSegmentSize, long size, int memoryTag, long opts) {
-        this.memoryTag = memoryTag;
-        openFile(ff, name);
-        if (size < 0) {
-            size = ff.length(fd);
-            if (size < 0) {
-                throw CairoException.instance(ff.errno()).put("Could not get length: ").put(name);
-            }
-        }
-        map(ff, name, size);
+    public void smallFile(FilesFacade ff, LPSZ name, int memoryTag) {
+        // Override default implementation to defer ff.length() call to use fd instead of path
+        of(ff, name, ff.getPageSize(), -1, memoryTag, CairoConfiguration.O_NONE, -1);
     }
 
-    protected void map(FilesFacade ff, LPSZ name, final long size) {
-        this.size = size;
-        if (size > 0) {
-            try {
-                this.pageAddress = TableUtils.mapRO(ff, fd, size, memoryTag);
-            } catch (Throwable e) {
-                close();
-                throw e;
-            }
-        } else {
-            assert size > -1;
-            this.pageAddress = 0;
-        }
-
-        // ---------------V leave a space here for alignment with open log message
-        LOG.debug().$("map  [file=").$(name).$(", fd=").$(fd).$(", pageSize=").$(size).$(", size=").$(this.size).$(']').$();
+    @Override
+    public void wholeFile(FilesFacade ff, LPSZ name, int memoryTag) {
+        // Override default implementation to defer ff.length() call to use fd instead of path
+        of(ff, name, ff.getMapPageSize(), -1, memoryTag, CairoConfiguration.O_NONE, -1);
     }
 
     private void openFile(FilesFacade ff, LPSZ name) {
@@ -119,10 +153,30 @@ public class MemoryCMRImpl extends AbstractMemoryCR implements MemoryCMR {
                 assert pageAddress == 0;
                 pageAddress = TableUtils.mapRO(ff, fd, newSize, memoryTag);
             }
+            ff.madvise(pageAddress, newSize, madviseOpts);
             size = newSize;
         } catch (Throwable e) {
             close();
             throw e;
         }
+    }
+
+    protected void map(FilesFacade ff, LPSZ name, final long size) {
+        this.size = size;
+        if (size > 0) {
+            try {
+                this.pageAddress = TableUtils.mapRO(ff, fd, size, memoryTag);
+                ff.madvise(pageAddress, size, madviseOpts);
+            } catch (Throwable e) {
+                close();
+                throw e;
+            }
+        } else {
+            assert size > -1;
+            this.pageAddress = 0;
+        }
+
+        // ---------------V leave a space here for alignment with open log message
+        LOG.debug().$("map  [file=").$(name).$(", fd=").$(fd).$(", pageSize=").$(size).$(", size=").$(this.size).$(']').$();
     }
 }

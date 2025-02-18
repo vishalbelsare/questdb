@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,18 +26,17 @@ package io.questdb.cairo;
 
 import io.questdb.metrics.Counter;
 import io.questdb.metrics.MetricsRegistry;
-import org.jetbrains.annotations.TestOnly;
+import io.questdb.std.Mutable;
 
-public class TableWriterMetrics {
+public class TableWriterMetrics implements Mutable {
 
     // Includes all types of commits (in-order and o3)
     private final Counter commitCounter;
-    private final Counter o3CommitCounter;
     private final Counter committedRowCounter;
-    private final Counter rollbackCounter;
-
+    private final Counter o3CommitCounter;
     // For write amplification metric, `physicallyWrittenRowCounter / committedRowCounter`.
     private final Counter physicallyWrittenRowCounter;
+    private final Counter rollbackCounter;
 
     public TableWriterMetrics(MetricsRegistry metricsRegistry) {
         this.commitCounter = metricsRegistry.newCounter("commits");
@@ -55,9 +54,33 @@ public class TableWriterMetrics {
         physicallyWrittenRowCounter.add(rows);
     }
 
-    @TestOnly
-    public long committedRows() {
-        return committedRowCounter.get();
+    @Override
+    public void clear() {
+        commitCounter.reset();
+        committedRowCounter.reset();
+        o3CommitCounter.reset();
+        physicallyWrittenRowCounter.reset();
+        rollbackCounter.reset();
+    }
+
+    public long getCommitCount() {
+        return commitCounter.getValue();
+    }
+
+    public long getCommittedRows() {
+        return committedRowCounter.getValue();
+    }
+
+    public long getO3CommitCount() {
+        return o3CommitCounter.getValue();
+    }
+
+    public long getPhysicallyWrittenRows() {
+        return physicallyWrittenRowCounter.getValue();
+    }
+
+    public long getRollbackCount() {
+        return rollbackCounter.getValue();
     }
 
     public void incrementCommits() {
@@ -70,10 +93,5 @@ public class TableWriterMetrics {
 
     public void incrementRollbacks() {
         rollbackCounter.inc();
-    }
-
-    @TestOnly
-    public long physicallyWrittenRows() {
-        return physicallyWrittenRowCounter.get();
     }
 }

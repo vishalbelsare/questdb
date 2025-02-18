@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,31 +24,35 @@
 
 package io.questdb.std;
 
+import io.questdb.cairo.Reopenable;
 import io.questdb.griffin.engine.LimitOverflowException;
 import io.questdb.log.Log;
 import io.questdb.log.LogFactory;
 
 import java.io.Closeable;
 
-public class MemoryPages implements Closeable, Mutable {
+public class MemoryPages implements Closeable, Mutable, Reopenable {
 
     private static final Log LOG = LogFactory.getLog(MemoryPages.class);
-
-    private final long pageSize;
-    private final long mask;
     private final int bits;
-
+    private final long mask;
+    private final int maxPages;
+    private final long pageSize;
     private final LongList pages = new LongList();
     private long cachePageHi;
     private long cachePageLo;
-    private final int maxPages;
 
     public MemoryPages(long pageSize, int maxPages) {
         this.pageSize = Numbers.ceilPow2(pageSize);
         this.bits = Numbers.msb(this.pageSize);
         this.mask = this.pageSize - 1;
         this.maxPages = maxPages;
-        allocate0(0);
+        try {
+            allocate0(0);
+        } catch (Throwable th) {
+            close();
+            throw th;
+        }
     }
 
     public long addressOf(long offset) {
@@ -81,6 +85,13 @@ public class MemoryPages implements Closeable, Mutable {
             }
         }
         pages.clear();
+        cachePageLo = 0;
+        cachePageHi = 0;
+    }
+
+    @Override
+    public void reopen() {
+        allocate0(0);
     }
 
     public long size() {
@@ -103,11 +114,5 @@ public class MemoryPages implements Closeable, Mutable {
 
         cachePageLo = index << bits;
         cachePageHi = cachePageLo + pageSize;
-    }
-
-    /* Returns number of chunks of chunkSize that fits in allocated memory (assuming there could be unused space at end of each page) */
-    public long countNumberOf(int chunkSize) {
-        return (cachePageLo >> bits) * (pageSize / chunkSize) + //full pages 
-                (cachePageLo & mask) / chunkSize; //last page
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,76 +24,82 @@
 
 package io.questdb.cutlass.pgwire;
 
-import io.questdb.WorkerPoolAwareConfiguration;
+import io.questdb.FactoryProvider;
 import io.questdb.cairo.sql.SqlExecutionCircuitBreakerConfiguration;
+import io.questdb.mp.WorkerPoolConfiguration;
 import io.questdb.network.IODispatcherConfiguration;
-import io.questdb.network.NetworkFacade;
+import io.questdb.std.ConcurrentCacheConfiguration;
 import io.questdb.std.Rnd;
 import io.questdb.std.datetime.DateLocale;
 
-public interface PGWireConfiguration extends WorkerPoolAwareConfiguration {
+public interface PGWireConfiguration extends IODispatcherConfiguration, WorkerPoolConfiguration {
+
     int getBinParamCountCapacity();
 
     int getCharacterStoreCapacity();
 
     int getCharacterStorePoolCapacity();
 
+    SqlExecutionCircuitBreakerConfiguration getCircuitBreakerConfiguration();
+
+    ConcurrentCacheConfiguration getConcurrentCacheConfiguration();
+
     int getConnectionPoolInitialCapacity();
+
+    DateLocale getDefaultDateLocale();
 
     String getDefaultPassword();
 
     String getDefaultUsername();
 
-    boolean readOnlySecurityContext();
-
-    IODispatcherConfiguration getDispatcherConfiguration();
-
     default boolean getDumpNetworkTraffic() {
         return false;
     }
 
-    boolean isSelectCacheEnabled();
+    FactoryProvider getFactoryProvider();
 
-    int getSelectCacheBlockCount();
+    int getForceRecvFragmentationChunkSize();
 
-    int getSelectCacheRowCount();
-
-    boolean isInsertCacheEnabled();
+    int getForceSendFragmentationChunkSize();
 
     int getInsertCacheBlockCount();
 
     int getInsertCacheRowCount();
 
-    int getInsertPoolCapacity();
-
-    boolean isUpdateCacheEnabled();
-
-    int getUpdateCacheBlockCount();
-
-    int getUpdateCacheRowCount();
-
     int getMaxBlobSizeOnQuery();
 
     int getNamedStatementCacheCapacity();
 
+    int getNamedStatementLimit();
+
     int getNamesStatementPoolCapacity();
 
-    NetworkFacade getNetworkFacade();
-
     int getPendingWritersCacheSize();
-
-    int getRecvBufferSize();
-
-    int getSendBufferSize();
-
-    String getServerVersion();
-
-    DateLocale getDefaultDateLocale();
 
     // this is used in tests to fix pseudo-random generator
     default Rnd getRandom() {
         return null;
     }
 
-    SqlExecutionCircuitBreakerConfiguration getCircuitBreakerConfiguration();
+    String getReadOnlyPassword();
+
+    String getReadOnlyUsername();
+
+    String getServerVersion();
+
+    int getUpdateCacheBlockCount();
+
+    int getUpdateCacheRowCount();
+
+    boolean isInsertCacheEnabled();
+
+    boolean isLegacyModeEnabled();
+
+    boolean isReadOnlyUserEnabled();
+
+    boolean isSelectCacheEnabled();
+
+    boolean isUpdateCacheEnabled();
+
+    boolean readOnlySecurityContext();
 }

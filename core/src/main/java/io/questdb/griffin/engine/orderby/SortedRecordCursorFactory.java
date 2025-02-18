@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,28 +26,33 @@ package io.questdb.griffin.engine.orderby;
 
 import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.ListColumnFilter;
 import io.questdb.cairo.RecordSink;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.RecordComparator;
+import org.jetbrains.annotations.NotNull;
 
 public class SortedRecordCursorFactory extends AbstractRecordCursorFactory {
     private final RecordCursorFactory base;
-    private final RecordTreeChain chain;
     private final SortedRecordCursor cursor;
 
+    private final ListColumnFilter sortColumnFilter;
+
     public SortedRecordCursorFactory(
-            CairoConfiguration configuration,
-            RecordMetadata metadata,
-            RecordCursorFactory base,
-            RecordSink recordSink,
-            RecordComparator comparator
+            @NotNull CairoConfiguration configuration,
+            @NotNull RecordMetadata metadata,
+            @NotNull RecordCursorFactory base,
+            @NotNull RecordSink recordSink,
+            @NotNull RecordComparator comparator,
+            @NotNull ListColumnFilter sortColumnFilter
     ) {
         super(metadata);
-        this.chain = new RecordTreeChain(
+        RecordTreeChain chain = new RecordTreeChain(
                 metadata,
                 recordSink,
                 comparator,
@@ -58,18 +63,29 @@ public class SortedRecordCursorFactory extends AbstractRecordCursorFactory {
         );
         this.base = base;
         this.cursor = new SortedRecordCursor(chain);
+        this.sortColumnFilter = sortColumnFilter;
     }
 
     @Override
-    public void close() {
-        base.close();
-        chain.close();
+    public RecordCursorFactory getBaseFactory() {
+        return base;
     }
 
     @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        this.cursor.of(base.getCursor(executionContext), executionContext);
-        return cursor;
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            cursor.of(baseCursor, executionContext);
+            return cursor;
+        } catch (Throwable th) {
+            cursor.close();
+            throw th;
+        }
+    }
+
+    @Override
+    public int getScanDirection() {
+        return getScanDirection(sortColumnFilter);
     }
 
     @Override
@@ -78,7 +94,39 @@ public class SortedRecordCursorFactory extends AbstractRecordCursorFactory {
     }
 
     @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Sort");
+        SortedLightRecordCursorFactory.addSortKeys(sink, sortColumnFilter);
+        sink.child(base);
+    }
+
+    @Override
     public boolean usesCompiledFilter() {
         return base.usesCompiledFilter();
+    }
+
+    @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
+
+    private static int toOrder(int filter) {
+        if (filter >= 0) {
+            return SCAN_DIRECTION_FORWARD;
+        } else {
+            return SCAN_DIRECTION_BACKWARD;
+        }
+    }
+
+    static int getScanDirection(ListColumnFilter sortColumnFilter) {
+        assert sortColumnFilter.size() > 0;
+
+        return toOrder(sortColumnFilter.get(0));
+    }
+
+    @Override
+    protected void _close() {
+        base.close();
+        cursor.close();
     }
 }

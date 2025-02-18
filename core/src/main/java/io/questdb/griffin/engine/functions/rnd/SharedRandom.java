@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,10 +29,10 @@ import io.questdb.std.Rnd;
 import org.jetbrains.annotations.NotNull;
 
 public class SharedRandom {
-    public static final ThreadLocal<Rnd> RANDOM = new ThreadLocal<>();
     // async random is used by SQL Async implementation in order to
     // not disturb the existing tests
     public static final ThreadLocal<Rnd> ASYNC_RANDOM = new ThreadLocal<>();
+    public static final ThreadLocal<Rnd> RANDOM = new ThreadLocal<>();
 
     public static Rnd getAsyncRandom(CairoConfiguration configuration) {
         return getRnd(configuration, ASYNC_RANDOM);

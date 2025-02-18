@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -40,12 +40,12 @@ import static io.questdb.griffin.SqlCodeGenerator.GKK_HOUR_INT;
 public class MinDoubleVectorAggregateFunction extends DoubleFunction implements VectorAggregateFunction {
 
     public static final DoubleBinaryOperator MIN = Math::min;
-    private final DoubleAccumulator min = new DoubleAccumulator(
-            MIN, Double.POSITIVE_INFINITY
-    );
     private final int columnIndex;
     private final DistinctFunc distinctFunc;
     private final KeyValueFunc keyValueFunc;
+    private final DoubleAccumulator min = new DoubleAccumulator(
+            MIN, Double.POSITIVE_INFINITY
+    );
     private int valueOffset;
 
     public MinDoubleVectorAggregateFunction(int keyKind, int columnIndex, int workerCount) {
@@ -60,9 +60,9 @@ public class MinDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void aggregate(long address, long addressSize, int columnSizeHint, int workerId) {
+    public void aggregate(long address, long frameRowCount, int workerId) {
         if (address != 0) {
-            final double value = Vect.minDouble(address, addressSize / Double.BYTES);
+            final double value = Vect.minDouble(address, frameRowCount);
             if (value == value) {
                 min.accumulate(value);
             }
@@ -70,19 +70,38 @@ public class MinDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void aggregate(long pRosti, long keyAddress, long valueAddress, long valueAddressSize, int columnSizeShr, int workerId) {
+    public boolean aggregate(long pRosti, long keyAddress, long valueAddress, long frameRowCount) {
         if (valueAddress == 0) {
             // no values? no problem :)
             // create list of distinct key values so that we can show NULL against them
-            distinctFunc.run(pRosti, keyAddress, valueAddressSize / Double.BYTES);
+            return distinctFunc.run(pRosti, keyAddress, frameRowCount);
         } else {
-            keyValueFunc.run(pRosti, keyAddress, valueAddress, valueAddressSize / Double.BYTES, valueOffset);
+            return keyValueFunc.run(pRosti, keyAddress, valueAddress, frameRowCount, valueOffset);
         }
+    }
+
+    @Override
+    public void clear() {
+        min.reset();
     }
 
     @Override
     public int getColumnIndex() {
         return columnIndex;
+    }
+
+    @Override
+    public double getDouble(Record rec) {
+        final double min = this.min.get();
+        if (Double.isInfinite(min)) {
+            return Double.NaN;
+        }
+        return min;
+    }
+
+    @Override
+    public String getName() {
+        return "min";
     }
 
     @Override
@@ -96,8 +115,8 @@ public class MinDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void merge(long pRostiA, long pRostiB) {
-        Rosti.keyedIntMinDoubleMerge(pRostiA, pRostiB, valueOffset);
+    public boolean merge(long pRostiA, long pRostiB) {
+        return Rosti.keyedIntMinDoubleMerge(pRostiA, pRostiB, valueOffset);
     }
 
     @Override
@@ -107,26 +126,7 @@ public class MinDoubleVectorAggregateFunction extends DoubleFunction implements 
     }
 
     @Override
-    public void wrapUp(long pRosti) {
-        Rosti.keyedIntMinDoubleWrapUp(pRosti, valueOffset, this.min.get());
-    }
-
-    @Override
-    public void clear() {
-        min.reset();
-    }
-
-    @Override
-    public double getDouble(Record rec) {
-        final double min = this.min.get();
-        if (Double.isInfinite(min)) {
-            return Double.NaN;
-        }
-        return min;
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return false;
+    public boolean wrapUp(long pRosti) {
+        return Rosti.keyedIntMinDoubleWrapUp(pRosti, valueOffset, this.min.get());
     }
 }

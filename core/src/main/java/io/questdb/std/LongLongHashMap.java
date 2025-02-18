@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -44,8 +44,16 @@ public class LongLongHashMap extends AbstractLongHashSet {
         clear();
     }
 
+    public int capacity() {
+        return keys.length;
+    }
+
     public long get(long key) {
         return valueAt(keyIndex(key));
+    }
+
+    public long keyAtRaw(int index) {
+        return keys[index];
     }
 
     public void put(long key, long value) {
@@ -68,16 +76,8 @@ public class LongLongHashMap extends AbstractLongHashSet {
         return index < 0 ? values[-index - 1] : noEntryValue;
     }
 
-    @Override
-    protected void erase(int index) {
-        keys[index] = this.noEntryKeyValue;
-    }
-
-    @Override
-    protected void move(int from, int to) {
-        keys[to] = keys[from];
-        values[to] = values[from];
-        erase(from);
+    public long valueAtRaw(int index) {
+        return values[index];
     }
 
     private void rehash() {
@@ -102,5 +102,17 @@ public class LongLongHashMap extends AbstractLongHashSet {
                 values[index] = oldValues[i];
             }
         }
+    }
+
+    @Override
+    protected void erase(int index) {
+        keys[index] = this.noEntryKeyValue;
+    }
+
+    @Override
+    protected void move(int from, int to) {
+        keys[to] = keys[from];
+        values[to] = values[from];
+        erase(from);
     }
 }

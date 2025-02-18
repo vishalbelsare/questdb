@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,11 +30,11 @@ import io.questdb.std.Mutable;
 import io.questdb.std.NumericException;
 import io.questdb.std.datetime.DateFormat;
 import io.questdb.std.datetime.DateLocale;
-import io.questdb.std.str.DirectByteCharSequence;
+import io.questdb.std.str.DirectUtf8Sequence;
 
 public class TimestampAdapter extends AbstractTypeAdapter implements Mutable {
-    protected DateLocale locale;
     protected DateFormat format;
+    protected DateLocale locale;
 
     @Override
     public void clear() {
@@ -42,15 +42,25 @@ public class TimestampAdapter extends AbstractTypeAdapter implements Mutable {
         this.locale = null;
     }
 
+    public long getTimestamp(DirectUtf8Sequence value) throws Exception {
+        return format.parse(value.asAsciiCharSequence(), locale);
+    }
+
     @Override
     public int getType() {
         return ColumnType.TIMESTAMP;
     }
 
+    public TimestampAdapter of(DateFormat format, DateLocale locale) {
+        this.format = format;
+        this.locale = locale;
+        return this;
+    }
+
     @Override
-    public boolean probe(CharSequence text) {
+    public boolean probe(DirectUtf8Sequence text) {
         try {
-            format.parse(text, locale);
+            format.parse(text.asAsciiCharSequence(), locale);
             return true;
         } catch (NumericException e) {
             return false;
@@ -58,17 +68,7 @@ public class TimestampAdapter extends AbstractTypeAdapter implements Mutable {
     }
 
     @Override
-    public void write(TableWriter.Row row, int column, DirectByteCharSequence value) throws Exception {
-        row.putDate(column, format.parse(value, locale));
-    }
-
-    public long getTimestamp(DirectByteCharSequence value) throws Exception {
-        return format.parse(value, locale);
-    }
-
-    public TimestampAdapter of(DateFormat format, DateLocale locale) {
-        this.format = format;
-        this.locale = locale;
-        return this;
+    public void write(TableWriter.Row row, int column, DirectUtf8Sequence value) throws Exception {
+        row.putDate(column, format.parse(value.asAsciiCharSequence(), locale));
     }
 }

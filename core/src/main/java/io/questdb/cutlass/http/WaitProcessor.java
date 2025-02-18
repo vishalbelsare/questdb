@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,7 +25,18 @@
 package io.questdb.cutlass.http;
 
 import io.questdb.cutlass.http.ex.RetryFailedOperationException;
-import io.questdb.mp.*;
+import io.questdb.mp.MCSequence;
+import io.questdb.mp.MPSequence;
+import io.questdb.mp.RingQueue;
+import io.questdb.mp.SCSequence;
+import io.questdb.mp.SPSequence;
+import io.questdb.mp.Sequence;
+import io.questdb.mp.SynchronizedJob;
+import io.questdb.network.IODispatcher;
+import io.questdb.network.IOOperation;
+import io.questdb.network.PeerIsSlowToReadException;
+import io.questdb.network.PeerIsSlowToWriteException;
+import io.questdb.network.ServerDisconnectException;
 import io.questdb.std.Misc;
 import io.questdb.std.Os;
 import io.questdb.std.datetime.millitime.MillisecondClock;
@@ -36,22 +47,24 @@ import java.util.PriorityQueue;
 
 public class WaitProcessor extends SynchronizedJob implements RescheduleContext, Closeable {
 
-    private final RingQueue<RetryHolder> inQueue;
-    private final Sequence inPubSequence;
-    private final Sequence inSubSequence;
-    private final PriorityQueue<Retry> nextRerun;
-    private final RingQueue<RetryHolder> outQueue;
-    private final Sequence outPubSequence;
-    private final Sequence outSubSequence;
     private final MillisecondClock clock;
-    private final long maxWaitCapMs;
+    private final IODispatcher<HttpConnectionContext> dispatcher;
     private final double exponentialWaitMultiplier;
+    private final Sequence inPubSequence;
+    private final RingQueue<RetryHolder> inQueue;
+    private final Sequence inSubSequence;
+    private final long maxWaitCapMs;
+    private final PriorityQueue<Retry> nextRerun;
+    private final Sequence outPubSequence;
+    private final RingQueue<RetryHolder> outQueue;
+    private final Sequence outSubSequence;
 
-    public WaitProcessor(WaitProcessorConfiguration configuration) {
-        this.clock = configuration.getClock();
-        this.maxWaitCapMs = configuration.getMaxWaitCapMs();
-        this.exponentialWaitMultiplier = configuration.getExponentialWaitMultiplier();
+    public WaitProcessor(WaitProcessorConfiguration configuration, IODispatcher<HttpConnectionContext> dispatcher) {
+        clock = configuration.getClock();
+        maxWaitCapMs = configuration.getMaxWaitCapMs();
+        exponentialWaitMultiplier = configuration.getExponentialWaitMultiplier();
         nextRerun = new PriorityQueue<>(configuration.getInitialWaitQueueSize(), WaitProcessor::compareRetriesInQueue);
+        this.dispatcher = dispatcher;
 
         int retryQueueLength = configuration.getMaxProcessingQueueSize();
         inQueue = new RingQueue<>(RetryHolder::new, retryQueueLength);
@@ -67,6 +80,7 @@ public class WaitProcessor extends SynchronizedJob implements RescheduleContext,
 
     @Override
     public void close() {
+        processInQueue(); // Process incoming queue to close all contexts
         for (int i = 0, n = nextRerun.size(); i < n; i++) {
             Misc.free(nextRerun.poll());
         }
@@ -86,17 +100,23 @@ public class WaitProcessor extends SynchronizedJob implements RescheduleContext,
             Retry retry = getNextRerun();
             if (retry != null) {
                 useful = true;
-                if (!retry.tryRerun(selector, this)) {
-                    try {
-                        reschedule(retry, retry.getAttemptDetails().attempt + 1, retry.getAttemptDetails().waitStartTimestamp);
-                    } catch (RetryFailedOperationException e) {
-                        retry.fail(selector, e);
-                    }
-                }
+                run(selector, retry);
             } else {
                 return useful;
             }
         }
+    }
+
+    @Override
+    public boolean runSerially() {
+        return processInQueue() || sendToOutQueue();
+    }
+
+    private static int compareRetriesInQueue(Retry r1, Retry r2) {
+        // r1, r2 are always not null, null retries are not queued
+        RetryAttemptAttributes a1 = r1.getAttemptDetails();
+        RetryAttemptAttributes a2 = r2.getAttemptDetails();
+        return Long.compare(a1.nextRunTimestamp, a2.nextRunTimestamp);
     }
 
     private long calculateNextTimestamp(RetryAttemptAttributes attemptAttributes) {
@@ -131,6 +151,7 @@ public class WaitProcessor extends SynchronizedJob implements RescheduleContext,
             long cursor = inSubSequence.next();
             // -2 = there was a contest for queue index and this thread has lost
             if (cursor < -1) {
+                Os.pause();
                 continue;
             }
 
@@ -164,10 +185,11 @@ public class WaitProcessor extends SynchronizedJob implements RescheduleContext,
             long cursor = inPubSequence.next();
             // -2 = there was a contest for queue index and this thread has lost
             if (cursor < -1) {
+                Os.pause();
                 continue;
             }
 
-            // -1 = queue is empty. It means there are already too many retries waiting
+            // -1 = queue is full. It means there are already too many retries waiting
             // Send error to client.
             if (cursor < 0) {
                 throw RetryFailedOperationException.INSTANCE;
@@ -180,9 +202,25 @@ public class WaitProcessor extends SynchronizedJob implements RescheduleContext,
         }
     }
 
-    @Override
-    protected boolean runSerially() {
-        return processInQueue() || sendToOutQueue();
+    private void run(HttpRequestProcessorSelector selector, Retry retry) {
+        try {
+            if (!retry.tryRerun(selector, this)) {
+                try {
+                    reschedule(retry, retry.getAttemptDetails().attempt + 1, retry.getAttemptDetails().waitStartTimestamp);
+                } catch (RetryFailedOperationException e) {
+                    retry.fail(selector, e);
+                }
+            }
+        } catch (PeerIsSlowToReadException e) {
+            HttpConnectionContext context = (HttpConnectionContext) retry;
+            dispatcher.registerChannel(context, IOOperation.WRITE);
+        } catch (PeerIsSlowToWriteException e) {
+            HttpConnectionContext context = (HttpConnectionContext) retry;
+            dispatcher.registerChannel(context, IOOperation.READ);
+        } catch (ServerDisconnectException e) {
+            HttpConnectionContext context = (HttpConnectionContext) retry;
+            dispatcher.disconnect((HttpConnectionContext) retry, context.getDisconnectReason());
+        }
     }
 
     private boolean sendToOutQueue() {
@@ -224,12 +262,5 @@ public class WaitProcessor extends SynchronizedJob implements RescheduleContext,
             outPubSequence.done(cursor);
             return true;
         }
-    }
-
-    private static int compareRetriesInQueue(Retry r1, Retry r2) {
-        // r1, r2 are always not null, null retries are not queued
-        RetryAttemptAttributes a1 = r1.getAttemptDetails();
-        RetryAttemptAttributes a2 = r2.getAttemptDetails();
-        return Long.compare(a1.nextRunTimestamp, a2.nextRunTimestamp);
     }
 }

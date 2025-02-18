@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,616 +24,437 @@
 
 package io.questdb;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.CairoException;
+import io.questdb.cairo.FlushQueryCacheJob;
+import io.questdb.cairo.security.ReadOnlySecurityContextFactory;
+import io.questdb.cairo.security.SecurityContextFactory;
+import io.questdb.cairo.wal.ApplyWal2TableJob;
+import io.questdb.cairo.wal.WalPurgeJob;
+import io.questdb.cutlass.Services;
+import io.questdb.cutlass.auth.AuthUtils;
+import io.questdb.cutlass.auth.DefaultLineAuthenticatorFactory;
+import io.questdb.cutlass.auth.EllipticCurveAuthenticatorFactory;
+import io.questdb.cutlass.auth.LineAuthenticatorFactory;
+import io.questdb.cutlass.http.DefaultHttpAuthenticatorFactory;
+import io.questdb.cutlass.http.HttpAuthenticatorFactory;
+import io.questdb.cutlass.http.HttpContextConfiguration;
+import io.questdb.cutlass.http.HttpFullFatServerConfiguration;
 import io.questdb.cutlass.http.HttpServer;
-import io.questdb.cutlass.json.JsonException;
-import io.questdb.cutlass.line.tcp.LineTcpReceiver;
-import io.questdb.cutlass.line.udp.LineUdpReceiver;
-import io.questdb.cutlass.line.udp.LinuxMMLineUdpReceiver;
-import io.questdb.cutlass.pgwire.PGWireServer;
-import io.questdb.griffin.DatabaseSnapshotAgent;
-import io.questdb.griffin.FunctionFactory;
-import io.questdb.griffin.FunctionFactoryCache;
-import io.questdb.jit.JitUtil;
-import io.questdb.log.Log;
+import io.questdb.cutlass.http.StaticHttpAuthenticatorFactory;
+import io.questdb.cutlass.line.tcp.StaticChallengeResponseMatcher;
+import io.questdb.cutlass.pgwire.IPGWireServer;
+import io.questdb.cutlass.pgwire.PGWireConfiguration;
+import io.questdb.cutlass.pgwire.ReadOnlyUsersAwareSecurityContextFactory;
+import io.questdb.cutlass.text.CopyJob;
+import io.questdb.cutlass.text.CopyRequestJob;
+import io.questdb.griffin.engine.table.AsyncFilterAtom;
 import io.questdb.log.LogFactory;
-import io.questdb.log.LogRecord;
+import io.questdb.metrics.QueryTracingJob;
 import io.questdb.mp.WorkerPool;
-import io.questdb.network.NetworkError;
-import io.questdb.std.*;
-import io.questdb.std.datetime.millitime.Dates;
-import io.questdb.std.str.Path;
-import sun.misc.Signal;
+import io.questdb.mp.WorkerPoolUtils;
+import io.questdb.std.CharSequenceObjHashMap;
+import io.questdb.std.Chars;
+import io.questdb.std.Misc;
+import io.questdb.std.filewatch.FileWatcher;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.TestOnly;
 
-import java.io.*;
-import java.net.*;
-import java.util.*;
-import java.util.concurrent.locks.LockSupport;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.io.Closeable;
+import java.io.File;
+import java.security.PublicKey;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-public class ServerMain {
-    private static final String VERSION_TXT = "version.txt";
-    private static final String PUBLIC_ZIP = "/io/questdb/site/public.zip";
+public class ServerMain implements Closeable {
+    private final Bootstrap bootstrap;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final CairoEngine engine;
+    private final FreeOnExit freeOnExit = new FreeOnExit();
+    private final AtomicBoolean running = new AtomicBoolean();
+    protected IPGWireServer pgWireServer;
+    private FileWatcher fileWatcher;
+    private HttpServer httpServer;
+    private boolean initialized;
+    private WorkerPoolManager workerPoolManager;
+    private Thread hydrateMetadataThread;
 
-    protected PropServerConfiguration configuration;
+    public ServerMain(String... args) {
+        this(new Bootstrap(args));
+    }
 
-    public ServerMain(String[] args) throws Exception {
-        //properties fetched from sources other than server.conf
-        final BuildInformation buildInformation = BuildInformationHolder.INSTANCE;
-
-        System.err.printf(
-                "QuestDB server %s%nCopyright (C) 2014-%d, all rights reserved.%n%n",
-                buildInformation.getQuestDbVersion(),
-                Dates.getYear(System.currentTimeMillis())
-        );
-        if (args.length < 1) {
-            System.err.println("Root directory name expected");
-            return;
-        }
-
-        if (Os.type == Os._32Bit) {
-            System.err.println("QuestDB requires 64-bit JVM");
-            return;
-        }
-
-        final CharSequenceObjHashMap<String> optHash = hashArgs(args);
-        // expected flags:
-        // -d <root dir> = sets root directory
-        // -f = forces copy of site to root directory even if site exists
-        // -n = disables handling of HUP signal
-
-        final String rootDirectory = optHash.get("-d");
-
-        LogFactory.configureFromSystemProperties(LogFactory.INSTANCE, null, rootDirectory);
-        final Log log = LogFactory.getLog("server-main");
-
-        log.advisoryW().$("QuestDB server ")
-                .$(buildInformation.getQuestDbVersion())
-                .$(". Copyright (C) 2014-").$(Dates.getYear(System.currentTimeMillis()))
-                .$(", all rights reserved.")
-                .$();
-        extractSite(buildInformation, rootDirectory, log);
-        final Properties properties = new Properties();
-        final String configurationFileName = "/server.conf";
-        final File configurationFile = new File(new File(rootDirectory, PropServerConfiguration.CONFIG_DIRECTORY), configurationFileName);
-
-        try (InputStream is = new FileInputStream(configurationFile)) {
-            properties.load(is);
-        }
-
-        log.advisoryW().$("Server config: ").$(configurationFile.getAbsoluteFile()).$();
-
+    public ServerMain(final Bootstrap bootstrap) {
+        this.bootstrap = bootstrap;
+        // create cairo engine
+        engine = freeOnExit.register(bootstrap.newCairoEngine());
         try {
-            readServerConfiguration(rootDirectory, properties, log, buildInformation);
-        } catch (ServerConfigurationException sce) {
-            log.errorW().$(sce.getMessage()).$();
-            throw sce;
+            final ServerConfiguration config = bootstrap.getConfiguration();
+            config.init(engine, freeOnExit);
+            freeOnExit.register(config.getFactoryProvider());
+            engine.load();
+        } catch (Throwable th) {
+            Misc.free(freeOnExit);
+            throw th;
         }
+    }
 
-        final CairoConfiguration cairoConfiguration = configuration.getCairoConfiguration();
-
-        final boolean httpEnabled = configuration.getHttpServerConfiguration().isEnabled();
-        final boolean httpReadOnly = configuration.getHttpServerConfiguration().getHttpContextConfiguration().readOnlySecurityContext();
-        final String httpReadOnlyHint = httpEnabled && httpReadOnly ? " [read-only]" : "";
-        final boolean pgEnabled = configuration.getPGWireConfiguration().isEnabled();
-        final boolean pgReadOnly = configuration.getPGWireConfiguration().readOnlySecurityContext();
-        final String pgReadOnlyHint = pgEnabled && pgReadOnly ? " [read-only]" : "";
-
-        log.advisoryW().$("Config changes applied:").$();
-        log.advisoryW().$("  http.enabled : ").$(httpEnabled).$(httpReadOnlyHint).$();
-        log.advisoryW().$("  tcp.enabled  : ").$(configuration.getLineTcpReceiverConfiguration().isEnabled()).$();
-        log.advisoryW().$("  pg.enabled   : ").$(pgEnabled).$(pgReadOnlyHint).$();
-
-        log.advisoryW().$("open database [id=").$(cairoConfiguration.getDatabaseIdLo()).$('.').$(cairoConfiguration.getDatabaseIdHi()).$(']').$();
-        log.advisoryW().$("platform [bit=").$(System.getProperty("sun.arch.data.model")).$(']').$();
-        switch (Os.type) {
-            case Os.WINDOWS:
-                log.advisoryW().$("OS/Arch: windows/amd64").$(Vect.getSupportedInstructionSetName()).$();
-                break;
-            case Os.LINUX_AMD64:
-                log.advisoryW().$("OS/Arch: linux/amd64").$(Vect.getSupportedInstructionSetName()).$();
-                break;
-            case Os.OSX_AMD64:
-                log.advisoryW().$("OS/Arch: apple/amd64").$(Vect.getSupportedInstructionSetName()).$();
-                break;
-            case Os.OSX_ARM64:
-                log.advisoryW().$("OS/Arch: apple/apple-silicon").$();
-                break;
-            case Os.LINUX_ARM64:
-                log.advisoryW().$("OS/Arch: linux/arm64").$(Vect.getSupportedInstructionSetName()).$();
-                break;
-            case Os.FREEBSD:
-                log.advisoryW().$("OS: freebsd/amd64").$(Vect.getSupportedInstructionSetName()).$();
-                break;
-            default:
-                log.criticalW().$("Unsupported OS").$(Vect.getSupportedInstructionSetName()).$();
-                break;
-        }
-        log.advisoryW().$("available CPUs: ").$(Runtime.getRuntime().availableProcessors()).$();
-        log.advisoryW().$("db root: ").$(cairoConfiguration.getRoot()).$();
-        log.advisoryW().$("backup root: ").$(cairoConfiguration.getBackupRoot()).$();
-        try (Path path = new Path()) {
-            verifyFileSystem("db", cairoConfiguration.getRoot(), path, log);
-            verifyFileSystem("backup", cairoConfiguration.getBackupRoot(), path, log);
-            verifyFileOpts(cairoConfiguration, path);
-        }
-
-        if (JitUtil.isJitSupported()) {
-            final int jitMode = configuration.getCairoConfiguration().getSqlJitMode();
-            switch (jitMode) {
-                case SqlJitMode.JIT_MODE_ENABLED:
-                    log.advisoryW().$("SQL JIT compiler mode: on").$();
-                    break;
-                case SqlJitMode.JIT_MODE_FORCE_SCALAR:
-                    log.advisoryW().$("SQL JIT compiler mode: scalar").$();
-                    break;
-                case SqlJitMode.JIT_MODE_DISABLED:
-                    log.advisoryW().$("SQL JIT compiler mode: off").$();
-                    break;
-                default:
-                    log.errorW().$("Unknown SQL JIT compiler mode: ").$(jitMode).$();
-                    break;
+    public static ServerMain create(String root, Map<String, String> env) {
+        final Map<String, String> newEnv = new HashMap<>(System.getenv());
+        newEnv.putAll(env);
+        PropBootstrapConfiguration bootstrapConfiguration = new PropBootstrapConfiguration() {
+            @Override
+            public Map<String, String> getEnv() {
+                return newEnv;
             }
-        }
+        };
 
-        Metrics metrics;
-        if (configuration.getMetricsConfiguration().isEnabled()) {
-            metrics = Metrics.enabled();
+        return new ServerMain(new Bootstrap(bootstrapConfiguration, Bootstrap.getServerMainArgs(root)));
+    }
+
+    public static ServerMain create(String root) {
+        return new ServerMain(Bootstrap.getServerMainArgs(root));
+    }
+
+    public static ServerMain createWithoutWalApplyJob(String root, Map<String, String> env) {
+        final Map<String, String> newEnv = new HashMap<>(System.getenv());
+        newEnv.putAll(env);
+        PropBootstrapConfiguration bootstrapConfiguration = new PropBootstrapConfiguration() {
+            @Override
+            public Map<String, String> getEnv() {
+                return newEnv;
+            }
+        };
+
+        return new ServerMain(new Bootstrap(bootstrapConfiguration, Bootstrap.getServerMainArgs(root))) {
+            @Override
+            protected void setupWalApplyJob(WorkerPool workerPool, CairoEngine engine, int sharedWorkerCount) {
+            }
+        };
+    }
+
+    public static HttpAuthenticatorFactory getHttpAuthenticatorFactory(ServerConfiguration configuration) {
+        HttpFullFatServerConfiguration httpConfig = configuration.getHttpServerConfiguration();
+        String username = httpConfig.getUsername();
+        if (Chars.empty(username)) {
+            return DefaultHttpAuthenticatorFactory.INSTANCE;
+        }
+        return new StaticHttpAuthenticatorFactory(username, httpConfig.getPassword());
+    }
+
+    public static LineAuthenticatorFactory getLineAuthenticatorFactory(ServerConfiguration configuration) {
+        LineAuthenticatorFactory authenticatorFactory;
+        // create default authenticator for Line TCP protocol
+        if (configuration.getLineTcpReceiverConfiguration().isEnabled() && configuration.getLineTcpReceiverConfiguration().getAuthDB() != null) {
+            // we need "root/" here, not "root/db/"
+            final String rootDir = new File(configuration.getCairoConfiguration().getDbRoot()).getParent();
+            final String absPath = new File(rootDir, configuration.getLineTcpReceiverConfiguration().getAuthDB()).getAbsolutePath();
+            CharSequenceObjHashMap<PublicKey> authDb = AuthUtils.loadAuthDb(absPath);
+            authenticatorFactory = new EllipticCurveAuthenticatorFactory(() -> new StaticChallengeResponseMatcher(authDb));
         } else {
-            metrics = Metrics.disabled();
+            authenticatorFactory = DefaultLineAuthenticatorFactory.INSTANCE;
         }
+        return authenticatorFactory;
+    }
 
-        final WorkerPool workerPool = new WorkerPool(configuration.getWorkerPoolConfiguration(), metrics);
-        final FunctionFactoryCache functionFactoryCache = new FunctionFactoryCache(
-                configuration.getCairoConfiguration(),
-                ServiceLoader.load(FunctionFactory.class, FunctionFactory.class.getClassLoader())
-        );
-        final ObjList<Closeable> instancesToClean = new ObjList<>();
-
-        LogFactory.configureFromSystemProperties(workerPool);
-        final CairoEngine cairoEngine = new CairoEngine(configuration.getCairoConfiguration(), metrics);
-        workerPool.assign(cairoEngine.getEngineMaintenanceJob());
-        instancesToClean.add(cairoEngine);
-
-        final DatabaseSnapshotAgent snapshotAgent = new DatabaseSnapshotAgent(cairoEngine);
-        instancesToClean.add(snapshotAgent);
-
-        if (!configuration.getCairoConfiguration().getTelemetryConfiguration().getDisableCompletely()) {
-            final TelemetryJob telemetryJob = new TelemetryJob(cairoEngine, functionFactoryCache);
-            instancesToClean.add(telemetryJob);
-
-            if (configuration.getCairoConfiguration().getTelemetryConfiguration().getEnabled()) {
-                workerPool.assign(telemetryJob);
-            }
+    public static SecurityContextFactory getSecurityContextFactory(ServerConfiguration configuration) {
+        boolean readOnlyInstance = configuration.getCairoConfiguration().isReadOnlyInstance();
+        if (readOnlyInstance) {
+            return ReadOnlySecurityContextFactory.INSTANCE;
+        } else {
+            PGWireConfiguration pgWireConfiguration = configuration.getPGWireConfiguration();
+            HttpContextConfiguration httpContextConfiguration = configuration.getHttpServerConfiguration().getHttpContextConfiguration();
+            boolean pgWireReadOnlyContext = pgWireConfiguration.readOnlySecurityContext();
+            boolean pgWireReadOnlyUserEnabled = pgWireConfiguration.isReadOnlyUserEnabled();
+            String pgWireReadOnlyUsername = pgWireReadOnlyUserEnabled ? pgWireConfiguration.getReadOnlyUsername() : null;
+            boolean httpReadOnly = httpContextConfiguration.readOnlySecurityContext();
+            return new ReadOnlyUsersAwareSecurityContextFactory(pgWireReadOnlyContext, pgWireReadOnlyUsername, httpReadOnly);
         }
+    }
 
-        workerPool.assignCleaner(Path.CLEANER);
-        O3Utils.setupWorkerPool(
-                workerPool,
-                cairoEngine,
-                configuration.getCairoConfiguration().getCircuitBreakerConfiguration(),
-                functionFactoryCache
-        );
-
+    public static void main(String[] args) {
         try {
-            initQuestDb(workerPool, cairoEngine, log);
-
-            instancesToClean.add(createHttpServer(workerPool, log, cairoEngine, functionFactoryCache, snapshotAgent, metrics));
-            instancesToClean.add(createMinHttpServer(workerPool, log, cairoEngine, functionFactoryCache, snapshotAgent, metrics));
-
-            if (configuration.getPGWireConfiguration().isEnabled()) {
-                instancesToClean.add(PGWireServer.create(
-                        configuration.getPGWireConfiguration(),
-                        workerPool,
-                        log,
-                        cairoEngine,
-                        functionFactoryCache,
-                        snapshotAgent,
-                        metrics
-                ));
+            new ServerMain(args).start(true);
+        } catch (Bootstrap.BootstrapException e) {
+            if (e.isSilentStacktrace()) {
+                System.err.println(e.getMessage());
+            } else {
+                //noinspection CallToPrintStackTrace
+                e.printStackTrace();
             }
-
-            if (configuration.getLineUdpReceiverConfiguration().isEnabled()) {
-                if (Os.type == Os.LINUX_AMD64 || Os.type == Os.LINUX_ARM64) {
-                    instancesToClean.add(new LinuxMMLineUdpReceiver(
-                            configuration.getLineUdpReceiverConfiguration(),
-                            cairoEngine,
-                            workerPool
-                    ));
-                } else {
-                    instancesToClean.add(new LineUdpReceiver(
-                            configuration.getLineUdpReceiverConfiguration(),
-                            cairoEngine,
-                            workerPool
-                    ));
-                }
-            }
-
-            instancesToClean.add(LineTcpReceiver.create(
-                    configuration.getLineTcpReceiverConfiguration(),
-                    workerPool,
-                    log,
-                    cairoEngine,
-                    metrics
-            ));
-
-            startQuestDb(workerPool, cairoEngine, log);
-            if (configuration.getHttpServerConfiguration().isEnabled()) {
-                logWebConsoleUrls(log, configuration);
-            }
-
-            System.gc();
-
-            log.advisoryW().$("enjoy").$();
-
-            if (Os.type != Os.WINDOWS && optHash.get("-n") == null) {
-                // suppress HUP signal
-                Signal.handle(new Signal("HUP"), signal -> {
-                });
-            }
-
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                System.err.println(new Date() + " QuestDB is shutting down");
-                shutdownQuestDb(workerPool, instancesToClean);
-                System.err.println(new Date() + " QuestDB is down");
-            }));
-        } catch (NetworkError e) {
-            log.errorW().$((Sinkable) e).$();
-            LockSupport.parkNanos(10000000L);
+            LogFactory.closeInstance();
+            System.exit(55);
+        } catch (Throwable thr) {
+            //noinspection CallToPrintStackTrace
+            thr.printStackTrace();
+            LogFactory.closeInstance();
             System.exit(55);
         }
     }
 
-    public static void deleteOrException(File file) {
-        if (!file.exists()) {
-            return;
-        }
-        deleteDirContentsOrException(file);
-
-        int retryCount = 3;
-        boolean deleted = false;
-        while (retryCount > 0 && !(deleted = file.delete())) {
-            retryCount--;
-            Thread.yield();
-        }
-
-        if (!deleted) {
-            throw new RuntimeException("Cannot delete file " + file);
-        }
+    public static @NotNull String propertyPathToEnvVarName(@NotNull String propertyPath) {
+        return "QDB_" + propertyPath.replace('.', '_').toUpperCase();
     }
 
-    public static void main(String[] args) throws Exception {
-        try {
-            new ServerMain(args);
-        } catch (ServerConfigurationException sce) {
-            System.err.println(sce.getMessage());
-            System.exit(1);
-        }
+    public void awaitTable(String tableName) {
+        getEngine().awaitTable(tableName, 30, TimeUnit.SECONDS);
     }
 
-    static void verifyFileOpts(CairoConfiguration cairoConfiguration, Path path) {
-        final FilesFacade ff = cairoConfiguration.getFilesFacade();
+    @TestOnly
+    public void awaitTxn(String tableName, long txn) {
+        getEngine().awaitTxn(tableName, txn, 15, TimeUnit.SECONDS);
+    }
 
-        path.of(cairoConfiguration.getRoot()).concat("_verify_").put(cairoConfiguration.getRandom().nextPositiveInt()).put(".d");
-        long fd = ff.openRW(path.$(), cairoConfiguration.getWriterFileOpenOpts());
-
-        try {
-            if (fd > -1) {
-                long mem = Unsafe.malloc(Long.BYTES, MemoryTag.NATIVE_DEFAULT);
+    @Override
+    public void close() {
+        if (closed.compareAndSet(false, true)) {
+            if (hydrateMetadataThread != null) {
                 try {
-                    TableUtils.writeLongOrFail(
-                            ff,
-                            fd,
-                            0,
-                            123456789L,
-                            mem,
-                            path
-                    );
-                } finally {
-                    Unsafe.free(mem, Long.BYTES, MemoryTag.NATIVE_DEFAULT);
+                    hydrateMetadataThread.join();
+                } catch (InterruptedException ignored) {
                 }
             }
-        } finally {
-            ff.close(fd);
-        }
-        ff.remove(path);
-    }
-
-    private static void logWebConsoleUrls(Log log, PropServerConfiguration configuration) throws SocketException {
-        final LogRecord record = log.infoW().$("web console URL(s):").$('\n').$('\n');
-        final int httpBindIP = configuration.getHttpServerConfiguration().getDispatcherConfiguration().getBindIPv4Address();
-        final int httpBindPort = configuration.getHttpServerConfiguration().getDispatcherConfiguration().getBindPort();
-        if (httpBindIP == 0) {
-            Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
-            for (NetworkInterface networkInterface : Collections.list(nets)) {
-                Enumeration<InetAddress> inetAddresses = networkInterface.getInetAddresses();
-                for (InetAddress inetAddress : Collections.list(inetAddresses)) {
-                    if (inetAddress instanceof Inet4Address) {
-                        record.$('\t').$("http:/").$(inetAddress).$(':').$(httpBindPort).$('\n');
-                    }
-                }
+            System.err.println("QuestDB is shutting down...");
+            System.out.println("QuestDB is shutting down...");
+            if (bootstrap != null && bootstrap.getLog() != null) {
+                // Still useful in case of custom logger
+                bootstrap.getLog().info().$("QuestDB is shutting down...").$();
             }
-            record.$('\n').$();
-        } else {
-            record.$('\t').$("http://").$ip(httpBindIP).$(':').$(httpBindPort).$('\n').$();
+            if (initialized) {
+                workerPoolManager.halt();
+                fileWatcher = Misc.free(fileWatcher);
+            }
+            freeOnExit.close();
         }
     }
 
-    private static CharSequenceObjHashMap<String> hashArgs(String[] args) {
-        CharSequenceObjHashMap<String> optHash = new CharSequenceObjHashMap<>();
-        String flag = null;
-        for (String s : args) {
-            if (s.startsWith("-")) {
-                if (flag != null) {
-                    optHash.put(flag, "");
-                }
-                flag = s;
-            } else {
-                if (flag != null) {
-                    optHash.put(flag, s);
-                    flag = null;
-                } else {
-                    System.err.println("Unknown arg: " + s);
-                    System.exit(55);
-                }
-            }
-        }
-
-        if (flag != null) {
-            optHash.put(flag, "");
-        }
-
-        return optHash;
+    public ServerConfiguration getConfiguration() {
+        return bootstrap.getConfiguration();
     }
 
-    private static String getPublicVersion(String publicDir) throws IOException {
-        File f = new File(publicDir, VERSION_TXT);
-        if (f.exists()) {
-            try (FileInputStream fis = new FileInputStream(f)) {
-                byte[] buf = new byte[128];
-                int len = fis.read(buf);
-                return new String(buf, 0, len);
-            }
+    public CairoEngine getEngine() {
+        if (closed.get()) {
+            throw new IllegalStateException("close was called");
         }
-        return null;
+        return engine;
     }
 
-    private static void setPublicVersion(String publicDir, String version) throws IOException {
-        File f = new File(publicDir, VERSION_TXT);
-        try (FileOutputStream fos = new FileOutputStream(f)) {
-            byte[] buf = version.getBytes();
-            fos.write(buf, 0, buf.length);
+    public int getHttpServerPort() {
+        if (httpServer != null) {
+            return httpServer.getPort();
+        }
+        throw CairoException.nonCritical().put("http server is not running");
+    }
+
+    public int getPgWireServerPort() {
+        if (pgWireServer != null) {
+            return pgWireServer.getPort();
+        }
+        throw CairoException.nonCritical().put("pgwire server is not running");
+    }
+
+    public WorkerPoolManager getWorkerPoolManager() {
+        if (closed.get()) {
+            throw new IllegalStateException("close was called");
+        }
+        return workerPoolManager;
+    }
+
+    public boolean hasBeenClosed() {
+        return closed.get();
+    }
+
+    public boolean hasStarted() {
+        return running.get();
+    }
+
+    @TestOnly
+    public void resetQueryCache() {
+        pgWireServer.resetQueryCache();
+    }
+
+    public void start() {
+        start(false);
+    }
+
+    public synchronized void start(boolean addShutdownHook) {
+        if (!closed.get() && running.compareAndSet(false, true)) {
+            initialize();
+
+            if (addShutdownHook) {
+                addShutdownHook();
+            }
+            workerPoolManager.start(bootstrap.getLog());
+            bootstrap.logBannerAndEndpoints(webConsoleSchema());
+            System.gc(); // final GC
+            bootstrap.getLog().advisoryW().$("enjoy").$();
         }
     }
 
-    //made package level for testing only
-    static void extractSite(BuildInformation buildInformation, String dir, Log log) throws IOException {
-        final String publicZip = "/io/questdb/site/public.zip";
-        final String publicDir = dir + "/public";
-        final byte[] buffer = new byte[1024 * 1024];
-        URL resource = ServerMain.class.getResource(publicZip);
-        long thisVersion = Long.MIN_VALUE;
-        if (resource == null) {
-            log.errorW().$("did not find Web Console build at '").$(publicZip).$("'. Proceeding without Web Console checks").$();
-        } else {
-            thisVersion = resource.openConnection().getLastModified();
-        }
-
-        boolean extracted = false;
-        final String oldVersionStr = getPublicVersion(publicDir);
-        final CharSequence dbVersion = buildInformation.getQuestDbVersion();
-        if (oldVersionStr == null) {
-            if (thisVersion != 0) {
-                extractSite0(dir, log, publicDir, buffer, Long.toString(thisVersion));
-            } else {
-                extractSite0(dir, log, publicDir, buffer, Chars.toString(dbVersion));
+    private void addShutdownHook() {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                System.err.println("SIGTERM received");
+                System.out.println("SIGTERM received");
+                // It's fine if the magic number doesn't get its way to logs.
+                // We log it merely to make sure that LOAD instructions generated by
+                // AsyncFilterAtom#preTouchColumns() aren't optimized away by JVM's JIT compiler.
+                bootstrap.getLog().debug().$("Pre-touch magic number: ").$(AsyncFilterAtom.PRE_TOUCH_BLACK_HOLE.sum()).$();
+                close();
+                LogFactory.closeInstance();
+            } catch (Error ignore) {
+                // ignore
+            } finally {
+                System.err.println("QuestDB is shutdown.");
+                System.out.println("QuestDB is shutdown.");
             }
-            extracted = true;
-        } else {
-            // This is a hack to deal with RT package problem
-            // in this package "thisVersion" is always 0, and we need to fall back
-            // to the database version.
-            if (thisVersion == 0) {
-                if (!Chars.equals(oldVersionStr, dbVersion)) {
-                    extractSite0(dir, log, publicDir, buffer, Chars.toString(dbVersion));
-                    extracted = true;
-                }
-            } else {
-                // it is possible that old version is the database version
-                // which means user might have switched from RT distribution to no-JVM on the same data dir
-                // in this case we might fail to parse the version string
+        }));
+    }
+
+    private synchronized void initialize() {
+        initialized = true;
+        final ServerConfiguration config = bootstrap.getConfiguration();
+        // create the worker pool manager, and configure the shared pool
+        final boolean walSupported = config.getCairoConfiguration().isWalSupported();
+        final boolean isReadOnly = config.getCairoConfiguration().isReadOnlyInstance();
+        final boolean walApplyEnabled = config.getCairoConfiguration().isWalApplyEnabled();
+        final CairoConfiguration cairoConfig = config.getCairoConfiguration();
+
+        workerPoolManager = new WorkerPoolManager(config) {
+            @Override
+            protected void configureSharedPool(WorkerPool sharedPool) {
                 try {
-                    final long oldVersion = Numbers.parseLong(oldVersionStr);
-                    if (thisVersion > oldVersion) {
-                        extractSite0(dir, log, publicDir, buffer, Long.toString(thisVersion));
-                        extracted = true;
-                    }
-                } catch (NumericException e) {
-                    extractSite0(dir, log, publicDir, buffer, Long.toString(thisVersion));
-                    extracted = true;
-                }
-            }
-        }
+                    sharedPool.assign(engine.getEngineMaintenanceJob());
 
-        if (!extracted) {
-            log.infoW().$("web console is up to date").$();
-        }
-    }
+                    WorkerPoolUtils.setupQueryJobs(sharedPool, engine);
 
-    private static void extractSite0(String dir, Log log, String publicDir, byte[] buffer, String thisVersion) throws IOException {
-        try (final InputStream is = ServerMain.class.getResourceAsStream(PUBLIC_ZIP)) {
-            if (is != null) {
-                try (ZipInputStream zip = new ZipInputStream(is)) {
-                    ZipEntry ze;
-                    while ((ze = zip.getNextEntry()) != null) {
-                        final File dest = new File(publicDir, ze.getName());
-                        if (!ze.isDirectory()) {
-                            copyInputStream(true, buffer, dest, zip, log);
+                    QueryTracingJob queryTracingJob = new QueryTracingJob(engine);
+                    sharedPool.assign(queryTracingJob);
+                    freeOnExit.register(queryTracingJob);
+
+                    if (!isReadOnly) {
+                        WorkerPoolUtils.setupWriterJobs(sharedPool, engine);
+
+                        if (walSupported) {
+                            sharedPool.assign(config.getFactoryProvider().getWalJobFactory().createCheckWalTransactionsJob(engine));
+                            final WalPurgeJob walPurgeJob = config.getFactoryProvider().getWalJobFactory().createWalPurgeJob(engine);
+                            engine.setWalPurgeJobRunLock(walPurgeJob.getRunLock());
+                            walPurgeJob.delayByHalfInterval();
+                            sharedPool.assign(walPurgeJob);
+                            sharedPool.freeOnExit(walPurgeJob);
+
+                            // wal apply job in the shared pool when there is no dedicated pool
+                            if (walApplyEnabled && !config.getWalApplyPoolConfiguration().isEnabled()) {
+                                setupWalApplyJob(sharedPool, engine, sharedPool.getWorkerCount());
+                            }
                         }
-                        zip.closeEntry();
+
+                        // text import
+                        CopyJob.assignToPool(engine.getMessageBus(), sharedPool);
+                        if (!Chars.empty(cairoConfig.getSqlCopyInputRoot())) {
+                            final CopyRequestJob copyRequestJob = new CopyRequestJob(
+                                    engine,
+                                    // save CPU resources for collecting and processing jobs
+                                    Math.max(1, sharedPool.getWorkerCount() - 2)
+                            );
+                            sharedPool.assign(copyRequestJob);
+                            sharedPool.freeOnExit(copyRequestJob);
+                        }
                     }
-                }
-            } else {
-                log.errorW().$("could not find site [resource=").$(PUBLIC_ZIP).$(']').$();
-            }
-        }
-        setPublicVersion(publicDir, thisVersion);
-        copyConfResource(dir, false, buffer, "conf/date.formats", log);
-        copyConfResource(dir, true, buffer, "conf/mime.types", log);
-        copyConfResource(dir, false, buffer, "conf/server.conf", log);
-        copyConfResource(dir, false, buffer, "conf/log.conf", log);
-    }
 
-    private static void copyConfResource(String dir, boolean force, byte[] buffer, String res, Log log) throws IOException {
-        File out = new File(dir, res);
-        try (InputStream is = ServerMain.class.getResourceAsStream("/io/questdb/site/" + res)) {
-            if (is != null) {
-                copyInputStream(force, buffer, out, is, log);
-            }
-        }
-    }
-
-    private static void copyInputStream(boolean force, byte[] buffer, File out, InputStream is, Log log) throws IOException {
-        final boolean exists = out.exists();
-        if (force || !exists) {
-            File dir = out.getParentFile();
-            if (!dir.exists() && !dir.mkdirs()) {
-                log.errorW().$("could not create directory [path=").$(dir).$(']').$();
-                return;
-            }
-            try (FileOutputStream fos = new FileOutputStream(out)) {
-                int n;
-                while ((n = is.read(buffer, 0, buffer.length)) > 0) {
-                    fos.write(buffer, 0, n);
-                }
-            }
-            log.infoW().$("extracted [path=").$(out).$(']').$();
-            return;
-        }
-        log.debugW().$("skipped [path=").$(out).$(']').$();
-    }
-
-    private static void deleteDirContentsOrException(File file) {
-        if (!file.exists()) {
-            return;
-        }
-        try {
-            if (notSymlink(file)) {
-                File[] files = file.listFiles();
-                if (files != null) {
-                    for (File f : files) {
-                        deleteOrException(f);
+                    // telemetry
+                    if (!cairoConfig.getTelemetryConfiguration().getDisableCompletely()) {
+                        final TelemetryJob telemetryJob = new TelemetryJob(engine);
+                        freeOnExit.register(telemetryJob);
+                        if (cairoConfig.getTelemetryConfiguration().getEnabled()) {
+                            sharedPool.assign(telemetryJob);
+                        }
                     }
+
+                } catch (Throwable thr) {
+                    throw new Bootstrap.BootstrapException(thr);
                 }
             }
-        } catch (IOException e) {
-            throw new RuntimeException("Cannot delete dir contents: " + file, e);
-        }
-    }
+        };
 
-    private static boolean notSymlink(File file) throws IOException {
-        if (file == null) {
-            throw new IllegalArgumentException("File must not be null");
-        }
-        if (File.separatorChar == '\\') {
-            return true;
+        if (walApplyEnabled && !isReadOnly && walSupported && config.getWalApplyPoolConfiguration().isEnabled()) {
+            WorkerPool walApplyWorkerPool = workerPoolManager.getInstance(
+                    config.getWalApplyPoolConfiguration(),
+                    WorkerPoolManager.Requester.WAL_APPLY
+            );
+            setupWalApplyJob(walApplyWorkerPool, engine, workerPoolManager.getSharedWorkerCount());
         }
 
-        File fileInCanonicalDir;
-        if (file.getParentFile() == null) {
-            fileInCanonicalDir = file;
-        } else {
-            File canonicalDir = file.getParentFile().getCanonicalFile();
-            fileInCanonicalDir = new File(canonicalDir, file.getName());
+        // http
+        freeOnExit.register(httpServer = services().createHttpServer(
+                config,
+                engine,
+                workerPoolManager
+        ));
+
+        // http min
+        freeOnExit.register(services().createMinHttpServer(
+                config.getHttpMinServerConfiguration(),
+                workerPoolManager
+        ));
+
+        // pg wire
+        freeOnExit.register(pgWireServer = services().createPGWireServer(
+                config.getPGWireConfiguration(),
+                engine,
+                workerPoolManager
+        ));
+
+        workerPoolManager.getSharedPool().assign(new FlushQueryCacheJob(
+                engine.getMessageBus(),
+                httpServer,
+                pgWireServer
+        ));
+
+        if (!isReadOnly && config.getLineTcpReceiverConfiguration().isEnabled()) {
+            // ilp/tcp
+            freeOnExit.register(services().createLineTcpReceiver(
+                    config.getLineTcpReceiverConfiguration(),
+                    engine,
+                    workerPoolManager
+            ));
+
+            // ilp/udp
+            freeOnExit.register(services().createLineUdpReceiver(
+                    config.getLineUdpReceiverConfiguration(),
+                    engine,
+                    workerPoolManager
+            ));
         }
 
-        return fileInCanonicalDir.getCanonicalFile().equals(fileInCanonicalDir.getAbsoluteFile());
+        // metadata hydration
+        hydrateMetadataThread = new Thread(engine.getMetadataCache()::onStartupAsyncHydrator);
+        hydrateMetadataThread.start();
+
+        System.gc(); // GC 1
+        bootstrap.getLog().advisoryW().$("server is ready to be started").$();
     }
 
-    protected static void shutdownQuestDb(final WorkerPool workerPool, final ObjList<? extends Closeable> instancesToClean) {
-        workerPool.halt();
-        Misc.freeObjList(instancesToClean);
+    protected Services services() {
+        return Services.INSTANCE;
     }
 
-    private static void verifyFileSystem(String kind, CharSequence dir, Path path, Log log) {
-        if (dir != null) {
-            path.of(dir).$();
-            // path will contain file system name
-            long fsStatus = Files.getFileSystemStatus(path);
-            path.seekZ();
-            LogRecord rec = log.advisoryW().$(kind).$(" file system magic: 0x");
-            if (fsStatus < 0) {
-                rec.$hex(-fsStatus).$(" [").$(path).$("] SUPPORTED").$();
-            } else {
-                rec.$hex(fsStatus).$(" [").$(path).$("] EXPERIMENTAL").$();
-                log.advisoryW().$("\n\n\n\t\t\t*** SYSTEM IS USING UNSUPPORTED FILE SYSTEM AND COULD BE UNSTABLE ***\n\n").$();
-            }
-        }
-    }
-
-    protected HttpServer createHttpServer(
-            final WorkerPool workerPool,
-            final Log log,
-            final CairoEngine cairoEngine,
-            FunctionFactoryCache functionFactoryCache,
-            DatabaseSnapshotAgent snapshotAgent,
-            Metrics metrics) {
-        return HttpServer.create(
-                configuration.getHttpServerConfiguration(),
-                workerPool,
-                log,
-                cairoEngine,
-                functionFactoryCache,
-                snapshotAgent,
-                metrics
-        );
-    }
-
-    protected HttpServer createMinHttpServer(
-            final WorkerPool workerPool,
-            final Log log,
-            final CairoEngine cairoEngine,
-            FunctionFactoryCache functionFactoryCache,
-            DatabaseSnapshotAgent snapshotAgent,
-            Metrics metrics) {
-        if (!metrics.isEnabled()) {
-            log.advisoryW().$("Min health server is starting. Health check endpoint will not consider unhandled errors when metrics are disabled.").$();
-        }
-        return HttpServer.createMin(
-                configuration.getHttpMinServerConfiguration(),
-                workerPool,
-                log,
-                cairoEngine,
-                functionFactoryCache,
-                snapshotAgent,
-                metrics
-        );
-    }
-
-    @SuppressWarnings("unused")
-    protected void initQuestDb(
-            final WorkerPool workerPool,
-            final CairoEngine cairoEngine,
-            final Log log
+    protected void setupWalApplyJob(
+            WorkerPool workerPool,
+            CairoEngine engine,
+            int sharedWorkerCount
     ) {
-        // For extension
+        for (int i = 0, workerCount = workerPool.getWorkerCount(); i < workerCount; i++) {
+            // create job per worker
+            final ApplyWal2TableJob applyWal2TableJob = new ApplyWal2TableJob(engine, workerCount, sharedWorkerCount);
+            workerPool.assign(i, applyWal2TableJob);
+            workerPool.freeOnExit(applyWal2TableJob);
+        }
     }
 
-    protected void readServerConfiguration(
-            final String rootDirectory,
-            final Properties properties,
-            Log log,
-            final BuildInformation buildInformation
-    ) throws ServerConfigurationException, JsonException {
-        configuration = new PropServerConfiguration(rootDirectory, properties, System.getenv(), log, buildInformation);
-    }
-
-    protected void startQuestDb(
-            final WorkerPool workerPool,
-            final CairoEngine cairoEngine,
-            final Log log
-    ) {
-        workerPool.start(log);
+    protected String webConsoleSchema() {
+        return "http";
     }
 }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,17 +31,8 @@ import io.questdb.std.Numbers;
  * and corresponding string values
  */
 public interface SymbolTable {
+    int VALUE_IS_NULL = Numbers.INT_NULL;
     int VALUE_NOT_FOUND = -2;
-    int VALUE_IS_NULL = Numbers.INT_NaN;
-
-    /**
-     * Look up CharSequence by symbol key. The returned value is mutable and
-     * must not be stored anywhere.
-     *
-     * @param key numeric key of the symbol
-     * @return mutable CharSequence value of the symbol
-     */
-    CharSequence valueOf(int key);
 
     /**
      * Look up "B" instance of CharSequence for symbol key. "B" instance allows
@@ -52,4 +43,13 @@ public interface SymbolTable {
      * @return string value of the symbol
      */
     CharSequence valueBOf(int key);
+
+    /**
+     * Look up CharSequence by symbol key. The returned value is mutable and
+     * must not be stored anywhere.
+     *
+     * @param key numeric key of the symbol
+     * @return mutable CharSequence value of the symbol
+     */
+    CharSequence valueOf(int key);
 }

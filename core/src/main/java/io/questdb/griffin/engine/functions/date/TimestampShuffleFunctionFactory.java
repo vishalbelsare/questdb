@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.SymbolTableSource;
 import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.TimestampFunction;
 import io.questdb.griffin.engine.functions.constants.TimestampConstant;
@@ -51,17 +52,22 @@ public class TimestampShuffleFunctionFactory implements FunctionFactory {
             CairoConfiguration configuration,
             SqlExecutionContext sqlExecutionContext
     ) {
-        final long start = args.getQuick(0).getTimestamp(null);
-        final long end = args.getQuick(1).getTimestamp(null);
-        if (start == Numbers.LONG_NaN || end == Numbers.LONG_NaN) {
+        long start = args.getQuick(0).getTimestamp(null);
+        long end = args.getQuick(1).getTimestamp(null);
+        if (start == Numbers.LONG_NULL || end == Numbers.LONG_NULL) {
             return TimestampConstant.NULL;
         }
-        return new TimestampShuffleFunction(start, end);
+
+        if (start <= end) {
+            return new TimestampShuffleFunction(start, end);
+        } else {
+            return new TimestampShuffleFunction(end, start);
+        }
     }
 
     private static class TimestampShuffleFunction extends TimestampFunction {
-        private final long start;
         private final long end;
+        private final long start;
         private Rnd rnd;
 
         public TimestampShuffleFunction(long start, long end) {
@@ -70,17 +76,18 @@ public class TimestampShuffleFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public void close() {
-        }
-
-        @Override
         public long getTimestamp(Record rec) {
             return start + rnd.nextPositiveLong() % (end - start);
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) {
+            rnd = executionContext.getRandom();
+        }
+
+        @Override
+        public void toPlan(PlanSink sink) {
+            sink.val("timestamp_shuffle(").val(start).val(',').val(end).val(')');
         }
 
         @Override
@@ -88,9 +95,6 @@ public class TimestampShuffleFunctionFactory implements FunctionFactory {
             rnd.reset();
         }
 
-        @Override
-        public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) {
-            rnd = executionContext.getRandom();
-        }
+
     }
 }

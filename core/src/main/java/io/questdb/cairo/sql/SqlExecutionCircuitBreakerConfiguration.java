@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,19 +25,29 @@
 package io.questdb.cairo.sql;
 
 import io.questdb.network.NetworkFacade;
-import io.questdb.std.datetime.microtime.MicrosecondClock;
+import io.questdb.std.datetime.millitime.MillisecondClock;
+import org.jetbrains.annotations.NotNull;
 
 public interface SqlExecutionCircuitBreakerConfiguration {
+
+    boolean checkConnection();
+
     int getBufferSize();
 
     int getCircuitBreakerThrottle();
 
+    @NotNull
+    MillisecondClock getClock();
+
+    @NotNull
     NetworkFacade getNetworkFacade();
 
+    /**
+     * Maximum SQL execution time in millis.
+     *
+     * @return maximum SQL execution time in millis
+     */
+    long getQueryTimeout();
+
     boolean isEnabled();
-
-    MicrosecondClock getClock();
-
-    // maximum SQL execution time in micros
-    long getMaxTime();
 }

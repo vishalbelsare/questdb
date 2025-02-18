@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -40,6 +40,15 @@ public class ArrayColumnTypes implements ColumnTypes, Mutable {
         return this;
     }
 
+    public ArrayColumnTypes addAll(ArrayColumnTypes that) {
+        types.addAll(that.types);
+        return this;
+    }
+
+    public void clear() {
+        types.clear();
+    }
+
     @Override
     public int getColumnCount() {
         return types.size();
@@ -48,9 +57,5 @@ public class ArrayColumnTypes implements ColumnTypes, Mutable {
     @Override
     public int getColumnType(int columnIndex) {
         return types.getQuick(columnIndex);
-    }
-
-    public void clear() {
-        types.clear();
     }
 }

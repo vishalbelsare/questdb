@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,8 +31,7 @@ import io.questdb.std.Misc;
 import io.questdb.std.ObjList;
 
 public class VirtualFunctionSkewedSymbolRecordCursor extends AbstractVirtualFunctionRecordCursor {
-
-    private RecordCursor managedCursor;
+    protected RecordCursor managedCursor;
 
     public VirtualFunctionSkewedSymbolRecordCursor(ObjList<Function> functions) {
         super(functions, true);
@@ -41,6 +40,7 @@ public class VirtualFunctionSkewedSymbolRecordCursor extends AbstractVirtualFunc
     @Override
     public void close() {
         managedCursor = Misc.free(managedCursor);
+        baseCursor = null;
     }
 
     public void of(RecordCursor managedCursor, RecordCursor baseCursor) {

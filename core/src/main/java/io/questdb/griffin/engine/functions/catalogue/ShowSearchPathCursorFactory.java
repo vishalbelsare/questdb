@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,18 +24,23 @@
 
 package io.questdb.griffin.engine.functions.catalogue;
 
+import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.GenericRecordMetadata;
 import io.questdb.cairo.TableColumnMetadata;
 import io.questdb.cairo.sql.RecordCursor;
-import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.griffin.engine.SingleValueRecordCursor;
 
-public class ShowSearchPathCursorFactory implements RecordCursorFactory {
+public class ShowSearchPathCursorFactory extends AbstractRecordCursorFactory {
     private final static GenericRecordMetadata METADATA = new GenericRecordMetadata();
     private static final StringValueRecord RECORD = new StringValueRecord("\"$user\", public");
     private final SingleValueRecordCursor cursor = new SingleValueRecordCursor(RECORD);
+
+    public ShowSearchPathCursorFactory() {
+        super(METADATA);
+    }
 
     @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) {
@@ -44,16 +49,16 @@ public class ShowSearchPathCursorFactory implements RecordCursorFactory {
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return METADATA;
-    }
-
-    @Override
     public boolean recordCursorSupportsRandomAccess() {
         return false;
     }
 
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("search_path");
+    }
+
     static {
-        METADATA.add(new TableColumnMetadata("search_path", 1, ColumnType.STRING));
+        METADATA.add(new TableColumnMetadata("search_path", ColumnType.STRING));
     }
 }

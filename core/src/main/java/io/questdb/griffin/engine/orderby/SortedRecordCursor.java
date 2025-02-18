@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,22 +24,32 @@
 
 package io.questdb.griffin.engine.orderby;
 
-import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
 import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.std.Misc;
 
 class SortedRecordCursor implements DelegatingRecordCursor {
     private final RecordTreeChain chain;
+    private RecordCursor baseCursor;
     private RecordTreeChain.TreeCursor chainCursor;
+    private SqlExecutionCircuitBreaker circuitBreaker;
+    private boolean isChainBuilt;
+    private boolean isOpen;
 
     public SortedRecordCursor(RecordTreeChain chain) {
         this.chain = chain;
+        this.isOpen = true;
     }
 
     @Override
     public void close() {
-        chainCursor.close();
-        chain.clear();
+        if (isOpen) {
+            isOpen = false;
+            chainCursor = Misc.free(chainCursor);
+            baseCursor = Misc.free(baseCursor);
+            Misc.free(chain);
+        }
     }
 
     @Override
@@ -48,8 +58,22 @@ class SortedRecordCursor implements DelegatingRecordCursor {
     }
 
     @Override
+    public Record getRecordB() {
+        return chainCursor.getRecordB();
+    }
+
+    @Override
     public SymbolTable getSymbolTable(int columnIndex) {
         return chainCursor.getSymbolTable(columnIndex);
+    }
+
+    @Override
+    public boolean hasNext() {
+        if (!isChainBuilt) {
+            buildChain();
+            isChainBuilt = true;
+        }
+        return chainCursor.hasNext();
     }
 
     @Override
@@ -58,13 +82,15 @@ class SortedRecordCursor implements DelegatingRecordCursor {
     }
 
     @Override
-    public boolean hasNext() {
-        return chainCursor.hasNext();
-    }
-
-    @Override
-    public Record getRecordB() {
-        return chainCursor.getRecordB();
+    public void of(RecordCursor baseCursor, SqlExecutionContext executionContext) {
+        this.baseCursor = baseCursor;
+        if (!isOpen) {
+            isOpen = true;
+            chain.reopen();
+        }
+        chainCursor = chain.getCursor(baseCursor);
+        circuitBreaker = executionContext.getCircuitBreaker();
+        isChainBuilt = false;
     }
 
     @Override
@@ -73,35 +99,25 @@ class SortedRecordCursor implements DelegatingRecordCursor {
     }
 
     @Override
+    public long size() {
+        return baseCursor.size();
+    }
+
+    @Override
     public void toTop() {
         chainCursor.toTop();
     }
 
-    @Override
-    public long size() {
-        return chainCursor.size();
-    }
-
-    @Override
-    public void of(RecordCursor base, SqlExecutionContext executionContext) {
-        try {
-            this.chainCursor = chain.getCursor(base);
-            final Record record = base.getRecord();
-            final SqlExecutionCircuitBreaker circuitBreaker = executionContext.getCircuitBreaker();
-
-            chain.clear();
-            while (base.hasNext()) {
-                circuitBreaker.statefulThrowExceptionIfTripped();
-                // Tree chain is liable to re-position record to
-                // other rows to do record comparison. We must use our
-                // own record instance in case base cursor keeps
-                // state in the record it returns.
-                chain.put(record);
-            }
-            chainCursor.toTop();
-        } catch (Throwable ex) {
-            base.close();
-            throw ex;
+    private void buildChain() {
+        final Record record = baseCursor.getRecord();
+        while (baseCursor.hasNext()) {
+            circuitBreaker.statefulThrowExceptionIfTripped();
+            // Tree chain is liable to re-position record to
+            // other rows to do record comparison. We must use our
+            // own record instance in case base cursor keeps
+            // state in the record it returns.
+            chain.put(record);
         }
+        toTop();
     }
 }

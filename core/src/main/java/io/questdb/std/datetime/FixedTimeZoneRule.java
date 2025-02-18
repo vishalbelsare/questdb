@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,16 +32,6 @@ public class FixedTimeZoneRule implements TimeZoneRules {
     }
 
     @Override
-    public long getOffset(long utcEpoch, int year, boolean leap) {
-        return offset;
-    }
-
-    @Override
-    public long getOffset(long utcEpoch) {
-        return offset;
-    }
-
-    @Override
     public long getNextDST(long utcEpoch, int year, boolean leap) {
         return Long.MAX_VALUE;
     }
@@ -49,5 +39,15 @@ public class FixedTimeZoneRule implements TimeZoneRules {
     @Override
     public long getNextDST(long utcEpoch) {
         return Long.MAX_VALUE;
+    }
+
+    @Override
+    public long getOffset(long utcEpoch, int year, boolean leap) {
+        return offset;
+    }
+
+    @Override
+    public long getOffset(long utcEpoch) {
+        return offset;
     }
 }

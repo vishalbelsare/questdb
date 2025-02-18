@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -45,10 +45,6 @@ public class RenameTableModel implements Mutable, ExecutionModel {
         return from;
     }
 
-    public void setFrom(ExpressionNode from) {
-        this.from = from;
-    }
-
     @Override
     public int getModelType() {
         return ExecutionModel.RENAME_TABLE;
@@ -56,6 +52,10 @@ public class RenameTableModel implements Mutable, ExecutionModel {
 
     public ExpressionNode getTo() {
         return to;
+    }
+
+    public void setFrom(ExpressionNode from) {
+        this.from = from;
     }
 
     public void setTo(ExpressionNode to) {

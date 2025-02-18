@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,8 +31,12 @@ import io.questdb.cairo.sql.ScalarFunction;
 import io.questdb.std.BinarySequence;
 import io.questdb.std.Long256;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
+import io.questdb.std.str.Utf8String;
 
 public abstract class BooleanFunction implements ScalarFunction {
+    protected static final Utf8String UTF_8_FALSE = new Utf8String("false");
+    protected static final Utf8String UTF_8_TRUE = new Utf8String("true");
 
     @Override
     public final BinarySequence getBin(Record rec) {
@@ -45,42 +49,77 @@ public abstract class BooleanFunction implements ScalarFunction {
     }
 
     @Override
-    public final byte getByte(Record rec) {
-        return (byte) (getBool(rec) ? 0 : 1);
+    public byte getByte(Record rec) {
+        return (byte) (getBool(rec) ? 1 : 0);
     }
 
     @Override
-    public final char getChar(Record rec) {
+    public char getChar(Record rec) {
         return getBool(rec) ? 'T' : 'F';
     }
 
     @Override
-    public final long getDate(Record rec) {
-        return getBool(rec) ? 0 : 1;
+    public long getDate(Record rec) {
+        return getBool(rec) ? 1 : 0;
     }
 
     @Override
-    public final double getDouble(Record rec) {
-        return getBool(rec) ? 0 : 1;
+    public double getDouble(Record rec) {
+        return getBool(rec) ? 1 : 0;
     }
 
     @Override
-    public final float getFloat(Record rec) {
-        return getBool(rec) ? 0 : 1;
+    public float getFloat(Record rec) {
+        return getBool(rec) ? 1 : 0;
     }
 
     @Override
-    public final int getInt(Record rec) {
-        return getBool(rec) ? 0 : 1;
+    public byte getGeoByte(Record rec) {
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public final long getLong(Record rec) {
-        return getBool(rec) ? 0 : 1;
+    public int getGeoInt(Record rec) {
+        throw new UnsupportedOperationException();
     }
 
     @Override
-    public final void getLong256(Record rec, CharSink sink) {
+    public long getGeoLong(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public short getGeoShort(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final int getIPv4(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int getInt(Record rec) {
+        return getBool(rec) ? 1 : 0;
+    }
+
+    @Override
+    public long getLong(Record rec) {
+        return getBool(rec) ? 1 : 0;
+    }
+
+    @Override
+    public long getLong128Hi(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getLong128Lo(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final void getLong256(Record rec, CharSink<?> sink) {
         throw new UnsupportedOperationException();
     }
 
@@ -100,18 +139,13 @@ public abstract class BooleanFunction implements ScalarFunction {
     }
 
     @Override
-    public final short getShort(Record rec) {
-        return (short) (getBool(rec) ? 0 : 1);
+    public short getShort(Record rec) {
+        return (short) (getBool(rec) ? 1 : 0);
     }
 
     @Override
-    public final CharSequence getStr(Record rec) {
+    public final CharSequence getStrA(Record rec) {
         return getStr0(rec);
-    }
-
-    @Override
-    public final void getStr(Record rec, CharSink sink) {
-        sink.put(getStr0(rec));
     }
 
     @Override
@@ -121,7 +155,7 @@ public abstract class BooleanFunction implements ScalarFunction {
 
     @Override
     public final int getStrLen(Record rec) {
-        return getBool(rec) ? "true".length() : "false".length();
+        return getStr0(rec).length();
     }
 
     @Override
@@ -136,27 +170,7 @@ public abstract class BooleanFunction implements ScalarFunction {
 
     @Override
     public long getTimestamp(Record rec) {
-        return getBool(rec) ? 0 : 1;
-    }
-
-    @Override
-    public byte getGeoByte(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public short getGeoShort(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int getGeoInt(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public long getGeoLong(Record rec) {
-        throw new UnsupportedOperationException();
+        return getBool(rec) ? 1 : 0;
     }
 
     @Override
@@ -164,7 +178,26 @@ public abstract class BooleanFunction implements ScalarFunction {
         return ColumnType.BOOLEAN;
     }
 
-    private String getStr0(Record rec) {
+    @Override
+    public Utf8Sequence getVarcharA(Record rec) {
+        return getVarchar0(rec);
+    }
+
+    @Override
+    public Utf8Sequence getVarcharB(Record rec) {
+        return getVarchar0(rec);
+    }
+
+    @Override
+    public final int getVarcharSize(Record rec) {
+        return getVarchar0(rec).size();
+    }
+
+    protected String getStr0(Record rec) {
         return getBool(rec) ? "true" : "false";
+    }
+
+    protected Utf8Sequence getVarchar0(Record rec) {
+        return getBool(rec) ? UTF_8_TRUE : UTF_8_FALSE;
     }
 }

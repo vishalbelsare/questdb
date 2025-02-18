@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -44,28 +44,13 @@ public class MaxTimestampGroupByFunction extends TimestampFunction implements Gr
     }
 
     @Override
-    public void computeFirst(MapValue mapValue, Record record) {
+    public void computeFirst(MapValue mapValue, Record record, long rowId) {
         mapValue.putTimestamp(valueIndex, arg.getTimestamp(record));
     }
 
     @Override
-    public void computeNext(MapValue mapValue, Record record) {
-        long max = mapValue.getTimestamp(valueIndex);
-        long next = arg.getTimestamp(record);
-        if (next > max) {
-            mapValue.putTimestamp(valueIndex, next);
-        }
-    }
-
-    @Override
-    public void pushValueTypes(ArrayColumnTypes columnTypes) {
-        this.valueIndex = columnTypes.getColumnCount();
-        columnTypes.add(ColumnType.TIMESTAMP);
-    }
-
-    @Override
-    public void setNull(MapValue mapValue) {
-        mapValue.putTimestamp(valueIndex, Numbers.LONG_NaN);
+    public void computeNext(MapValue mapValue, Record record, long rowId) {
+        mapValue.maxLong(valueIndex, arg.getTimestamp(record));
     }
 
     @Override
@@ -74,7 +59,57 @@ public class MaxTimestampGroupByFunction extends TimestampFunction implements Gr
     }
 
     @Override
+    public String getName() {
+        return "max";
+    }
+
+    @Override
     public long getTimestamp(Record rec) {
         return rec.getTimestamp(valueIndex);
+    }
+
+    @Override
+    public int getValueIndex() {
+        return valueIndex;
+    }
+
+    @Override
+    public void initValueIndex(int valueIndex) {
+        this.valueIndex = valueIndex;
+    }
+
+    @Override
+    public void initValueTypes(ArrayColumnTypes columnTypes) {
+        this.valueIndex = columnTypes.getColumnCount();
+        columnTypes.add(ColumnType.TIMESTAMP);
+    }
+
+    @Override
+    public boolean isConstant() {
+        return false;
+    }
+
+    @Override
+    public boolean isThreadSafe() {
+        return UnaryFunction.super.isThreadSafe();
+    }
+
+    @Override
+    public void merge(MapValue destValue, MapValue srcValue) {
+        long srcMax = srcValue.getLong(valueIndex);
+        long destMax = destValue.getLong(valueIndex);
+        if (srcMax > destMax) {
+            destValue.putLong(valueIndex, srcMax);
+        }
+    }
+
+    @Override
+    public void setNull(MapValue mapValue) {
+        mapValue.putTimestamp(valueIndex, Numbers.LONG_NULL);
+    }
+
+    @Override
+    public boolean supportsParallelism() {
+        return UnaryFunction.super.supportsParallelism();
     }
 }

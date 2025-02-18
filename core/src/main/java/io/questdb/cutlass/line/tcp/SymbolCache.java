@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,43 +26,59 @@ package io.questdb.cutlass.line.tcp;
 
 import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.SymbolMapReaderImpl;
+import io.questdb.cairo.TableWriterAPI;
 import io.questdb.cairo.TxReader;
-import io.questdb.cairo.sql.SymbolLookup;
 import io.questdb.cairo.sql.SymbolTable;
-import io.questdb.std.Chars;
-import io.questdb.std.ObjIntHashMap;
 import io.questdb.std.Unsafe;
+import io.questdb.std.Utf8StringIntHashMap;
 import io.questdb.std.datetime.microtime.MicrosecondClock;
-import io.questdb.std.str.Path;
+import io.questdb.std.str.*;
 
 import java.io.Closeable;
 
-class SymbolCache implements Closeable, SymbolLookup {
-    private final ObjIntHashMap<CharSequence> symbolValueToKeyMap = new ObjIntHashMap<>(
+public class SymbolCache implements DirectUtf8SymbolLookup, Closeable {
+    private final MicrosecondClock clock;
+    private final SymbolMapReaderImpl symbolMapReader = new SymbolMapReaderImpl();
+    private final Utf8StringIntHashMap symbolValueToKeyMap = new Utf8StringIntHashMap(
             256,
             0.5,
             SymbolTable.VALUE_NOT_FOUND
     );
-    private TxReader txReader;
-    private final SymbolMapReaderImpl symbolMapReader = new SymbolMapReaderImpl();
-    private final MicrosecondClock clock;
-    private final long waitUsBeforeReload;
+    private final StringSink tempSink = new StringSink();
+    private final long waitIntervalBeforeReload;
+    private int columnIndex;
     private long lastSymbolReaderReloadTimestamp;
     private int symbolIndexInTxFile;
+    private TxReader txReader;
+    private TableWriterAPI writerAPI;
 
-    SymbolCache(LineTcpReceiverConfiguration configuration) {
-        this.clock = configuration.getMicrosecondClock();
-        this.waitUsBeforeReload = configuration.getSymbolCacheWaitUsBeforeReload();
+    public SymbolCache(LineTcpReceiverConfiguration configuration) {
+        this(configuration.getMicrosecondClock(), configuration.getSymbolCacheWaitBeforeReload());
+    }
+
+    public SymbolCache(MicrosecondClock microsecondClock, long waitIntervalBeforeReload) {
+        this.clock = microsecondClock;
+        this.waitIntervalBeforeReload = waitIntervalBeforeReload;
     }
 
     @Override
     public void close() {
+        txReader = null;
+        writerAPI = null;
         symbolMapReader.close();
-        symbolValueToKeyMap.clear();
+        symbolValueToKeyMap.reset();
+    }
+
+    public int getCacheCapacity() {
+        return symbolValueToKeyMap.capacity();
+    }
+
+    public int getCacheValueCount() {
+        return symbolValueToKeyMap.size();
     }
 
     @Override
-    public int keyOf(CharSequence value) {
+    public int keyOf(DirectUtf8Sequence value) {
         final int index = symbolValueToKeyMap.keyIndex(value);
         if (index < 0) {
             return symbolValueToKeyMap.valueAt(index);
@@ -72,40 +88,50 @@ class SymbolCache implements Closeable, SymbolLookup {
         int symbolValueCount;
 
         if (
-                ticks - lastSymbolReaderReloadTimestamp > waitUsBeforeReload &&
-                        (symbolValueCount = safeReadUncommittedSymbolCount(symbolIndexInTxFile, true)) > symbolMapReader.getSymbolCount()
+                ticks - lastSymbolReaderReloadTimestamp > waitIntervalBeforeReload &&
+                        (symbolValueCount = readSymbolCount(symbolIndexInTxFile, true)) > symbolMapReader.getSymbolCount()
         ) {
             symbolMapReader.updateSymbolCount(symbolValueCount);
             lastSymbolReaderReloadTimestamp = ticks;
         }
 
-        final int symbolKey = symbolMapReader.keyOf(value);
+        Utf8s.utf8ToUtf16Unchecked(value, tempSink);
+        final int symbolKey = symbolMapReader.keyOf(tempSink);
 
-        if (SymbolTable.VALUE_NOT_FOUND != symbolKey) {
-            symbolValueToKeyMap.putAt(index, Chars.toString(value), symbolKey);
+        if (symbolKey != SymbolTable.VALUE_NOT_FOUND) {
+            symbolValueToKeyMap.putAt(index, Utf8String.newInstance(value), symbolKey);
         }
 
         return symbolKey;
     }
 
-    int getCacheValueCount() {
-        return symbolValueToKeyMap.size();
-    }
-
-    void of(CairoConfiguration configuration,
+    public void of(
+            CairoConfiguration configuration,
+            TableWriterAPI writerAPI,
+            int columnIndex,
             Path path,
             CharSequence columnName,
             int symbolIndexInTxFile,
             TxReader txReader,
             long columnNameTxn
     ) {
+        this.writerAPI = writerAPI;
+        this.columnIndex = columnIndex;
         this.symbolIndexInTxFile = symbolIndexInTxFile;
-        final int plen = path.length();
+        final int plen = path.size();
         this.txReader = txReader;
-        int symCount = safeReadUncommittedSymbolCount(symbolIndexInTxFile, false);
+        int symCount = readSymbolCount(symbolIndexInTxFile, false);
         path.trimTo(plen);
         symbolMapReader.of(configuration, path, columnName, columnNameTxn, symCount);
-        symbolValueToKeyMap.clear(symCount);
+        symbolValueToKeyMap.clear();
+    }
+
+    private int readSymbolCount(int symbolIndexInTxFile, boolean initialStateOk) {
+        int watermark = writerAPI.getSymbolCountWatermark(columnIndex);
+        if (watermark != -1) {
+            return watermark;
+        }
+        return safeReadUncommittedSymbolCount(symbolIndexInTxFile, initialStateOk);
     }
 
     private int safeReadUncommittedSymbolCount(int symbolIndexInTxFile, boolean initialStateOk) {

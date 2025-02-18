@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,12 +27,11 @@ package io.questdb.griffin.engine.functions.conditional;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.engine.functions.ByteFunction;
-import io.questdb.griffin.engine.functions.MultiArgFunction;
 import io.questdb.std.ObjList;
 
-class ByteCaseFunction extends ByteFunction implements MultiArgFunction {
-    private final CaseFunctionPicker picker;
+class ByteCaseFunction extends ByteFunction implements CaseFunction {
     private final ObjList<Function> args;
+    private final CaseFunctionPicker picker;
 
     public ByteCaseFunction(CaseFunctionPicker picker, ObjList<Function> args) {
         this.picker = picker;

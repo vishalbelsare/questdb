@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ package io.questdb.griffin.engine.groupby.vect;
 import io.questdb.cairo.ArrayColumnTypes;
 import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.sql.Record;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlCodeGenerator;
 import io.questdb.griffin.engine.functions.LongFunction;
 import io.questdb.std.Rosti;
@@ -44,18 +45,28 @@ public class CountVectorAggregateFunction extends LongFunction implements Vector
     }
 
     @Override
-    public void aggregate(long address, long addressSize, int columnSizeHint, int workerId) {
-        this.count.add(addressSize >>> columnSizeHint);
+    public void aggregate(long address, long frameRowCount, int workerId) {
+        this.count.add(frameRowCount);
     }
 
     @Override
-    public void aggregate(long pRosti, long keyAddress, long valueAddress, long valueAddressSize, int columnSizeShr, int workerId) {
-        countFunc.count(pRosti, keyAddress, valueAddressSize >>> columnSizeShr, valueOffset);
+    public boolean aggregate(long pRosti, long keyAddress, long valueAddress, long frameRowCount) {
+        return countFunc.count(pRosti, keyAddress, frameRowCount, valueOffset);
+    }
+
+    @Override
+    public void clear() {
+        count.reset();
     }
 
     @Override
     public int getColumnIndex() {
         return -1;
+    }
+
+    @Override
+    public long getLong(Record rec) {
+        return count.sum();
     }
 
     @Override
@@ -69,8 +80,8 @@ public class CountVectorAggregateFunction extends LongFunction implements Vector
     }
 
     @Override
-    public void merge(long pRostiA, long pRostiB) {
-        Rosti.keyedIntCountMerge(pRostiA, pRostiB, valueOffset);
+    public boolean merge(long pRostiA, long pRostiB) {
+        return Rosti.keyedIntCountMerge(pRostiA, pRostiB, valueOffset);
     }
 
     @Override
@@ -80,26 +91,17 @@ public class CountVectorAggregateFunction extends LongFunction implements Vector
     }
 
     @Override
-    public void wrapUp(long pRosti) {
+    public void toPlan(PlanSink sink) {
+        sink.val("count(*)");
     }
 
     @Override
-    public void clear() {
-        count.reset();
-    }
-
-    @Override
-    public long getLong(Record rec) {
-        return count.sum();
-    }
-
-    @Override
-    public boolean isReadThreadSafe() {
-        return false;
+    public boolean wrapUp(long pRosti) {
+        return Rosti.keyedIntCountWrapUp(pRosti, valueOffset, count.sum() > 0 ? count.sum() : -1);
     }
 
     @FunctionalInterface
     private interface CountFunc {
-        void count(long pRosti, long pKeys, long count, int valueOffset);
+        boolean count(long pRosti, long pKeys, long count, int valueOffset);
     }
 }

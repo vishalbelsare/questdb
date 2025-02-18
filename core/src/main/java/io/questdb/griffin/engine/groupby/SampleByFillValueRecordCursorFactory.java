@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,25 +31,27 @@ import io.questdb.cairo.ListColumnFilter;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.griffin.engine.functions.constants.*;
 import io.questdb.griffin.engine.functions.groupby.InterpolationGroupByFunction;
 import io.questdb.griffin.model.ExpressionNode;
+import io.questdb.griffin.model.IntervalUtils;
 import io.questdb.std.*;
 import org.jetbrains.annotations.NotNull;
 
 import static io.questdb.griffin.SqlKeywords.*;
 
 public class SampleByFillValueRecordCursorFactory extends AbstractSampleByFillRecordCursorFactory {
-    private final AbstractNoRecordSampleByCursor cursor;
+    private final SampleByFillValueRecordCursor cursor;
 
     public SampleByFillValueRecordCursorFactory(
+            @Transient @NotNull BytecodeAssembler asm,
             CairoConfiguration configuration,
             RecordCursorFactory base,
             @NotNull TimestampSampler timestampSampler,
             @Transient @NotNull ListColumnFilter listColumnFilter,
-            @Transient @NotNull BytecodeAssembler asm,
             @Transient @NotNull ObjList<ExpressionNode> fillValues,
             @Transient @NotNull ArrayColumnTypes keyTypes,
             @Transient @NotNull ArrayColumnTypes valueTypes,
@@ -61,13 +63,17 @@ public class SampleByFillValueRecordCursorFactory extends AbstractSampleByFillRe
             Function timezoneNameFunc,
             int timezoneNameFuncPos,
             Function offsetFunc,
-            int offsetFuncPos
+            int offsetFuncPos,
+            Function sampleFromFunc,
+            int sampleFromFuncPos,
+            Function sampleToFunc,
+            int sampleToFuncPos
     ) throws SqlException {
         super(
+                asm,
                 configuration,
                 base,
                 listColumnFilter,
-                asm,
                 keyTypes,
                 valueTypes,
                 groupByMetadata,
@@ -82,10 +88,13 @@ public class SampleByFillValueRecordCursorFactory extends AbstractSampleByFillRe
                     fillValues,
                     false
             );
-            this.cursor = new SampleByFillValueRecordCursor(
+            final GroupByFunctionsUpdater updater = GroupByFunctionsUpdaterFactory.getInstance(asm, groupByFunctions);
+            cursor = new SampleByFillValueRecordCursor(
+                    configuration,
                     map,
                     mapSink,
                     groupByFunctions,
+                    updater,
                     recordFunctions,
                     placeholderFunctions,
                     timestampIndex,
@@ -93,12 +102,56 @@ public class SampleByFillValueRecordCursorFactory extends AbstractSampleByFillRe
                     timezoneNameFunc,
                     timezoneNameFuncPos,
                     offsetFunc,
-                    offsetFuncPos
+                    offsetFuncPos,
+                    sampleFromFunc,
+                    sampleFromFuncPos,
+                    sampleToFunc,
+                    sampleToFuncPos
             );
         } catch (Throwable e) {
             Misc.freeObjList(recordFunctions);
             Misc.free(map);
             throw e;
+        }
+    }
+
+    @Override
+    public void toPlan(PlanSink sink) {
+        sink.type("Sample By");
+        sink.attr("fill").val("value");
+        sink.optAttr("keys", GroupByRecordCursorFactory.getKeys(recordFunctions, getMetadata()));
+        sink.optAttr("values", cursor.groupByFunctions, true);
+        sink.child(base);
+    }
+
+    static Function createPlaceHolderFunction(IntList recordFunctionPositions, int index, int type, ExpressionNode fillNode) throws SqlException {
+        try {
+            switch (ColumnType.tagOf(type)) {
+                case ColumnType.INT:
+                    return IntConstant.newInstance(Numbers.parseInt(fillNode.token));
+                case ColumnType.IPv4:
+                    return IPv4Constant.newInstance(Numbers.parseIPv4(fillNode.token));
+                case ColumnType.LONG:
+                    return LongConstant.newInstance(Numbers.parseLong(fillNode.token));
+                case ColumnType.FLOAT:
+                    return FloatConstant.newInstance(Numbers.parseFloat(fillNode.token));
+                case ColumnType.DOUBLE:
+                    return DoubleConstant.newInstance(Numbers.parseDouble(fillNode.token));
+                case ColumnType.SHORT:
+                    return ShortConstant.newInstance((short) Numbers.parseInt(fillNode.token));
+                case ColumnType.BYTE:
+                    return ByteConstant.newInstance((byte) Numbers.parseInt(fillNode.token));
+                case ColumnType.TIMESTAMP:
+                    if (!Chars.isQuoted(fillNode.token)) {
+                        throw SqlException.position(fillNode.position).put("Invalid fill value: '").put(fillNode.token).put("'. Timestamp fill value must be in quotes. Example: '2019-01-01T00:00:00.000Z'");
+                    }
+                    long ts = IntervalUtils.parseFloorPartialTimestamp(fillNode.token, 1, fillNode.token.length() - 1);
+                    return TimestampConstant.newInstance(ts);
+                default:
+                    throw SqlException.$(recordFunctionPositions.getQuick(index), "Unsupported type: ").put(ColumnType.nameOf(type));
+            }
+        } catch (NumericException e) {
+            throw SqlException.position(fillNode.position).put("invalid fill value: ").put(fillNode.token);
         }
     }
 
@@ -110,7 +163,6 @@ public class SampleByFillValueRecordCursorFactory extends AbstractSampleByFillRe
             @NotNull @Transient ObjList<ExpressionNode> fillValues,
             boolean linearSupported
     ) throws SqlException {
-
         final ObjList<Function> placeholderFunctions = new ObjList<>();
         int fillIndex = 0;
         final int fillValueCount = fillValues.size();
@@ -141,29 +193,6 @@ public class SampleByFillValueRecordCursorFactory extends AbstractSampleByFillRe
             }
         }
         return placeholderFunctions;
-    }
-
-    static Function createPlaceHolderFunction(IntList recordFunctionPositions, int index, int type, ExpressionNode fillNode) throws SqlException {
-        try {
-            switch (ColumnType.tagOf(type)) {
-                case ColumnType.INT:
-                    return IntConstant.newInstance(Numbers.parseInt(fillNode.token));
-                case ColumnType.LONG:
-                    return LongConstant.newInstance(Numbers.parseLong(fillNode.token));
-                case ColumnType.FLOAT:
-                    return FloatConstant.newInstance(Numbers.parseFloat(fillNode.token));
-                case ColumnType.DOUBLE:
-                    return DoubleConstant.newInstance(Numbers.parseDouble(fillNode.token));
-                case ColumnType.SHORT:
-                    return ShortConstant.newInstance((short) Numbers.parseInt(fillNode.token));
-                case ColumnType.BYTE:
-                    return ByteConstant.newInstance((byte) Numbers.parseInt(fillNode.token));
-                default:
-                    throw SqlException.$(recordFunctionPositions.getQuick(index), "Unsupported type: ").put(ColumnType.nameOf(type));
-            }
-        } catch (NumericException e) {
-            throw SqlException.position(fillNode.position).put("invalid number: ").put(fillNode.token);
-        }
     }
 
     @Override

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,34 +24,40 @@
 
 package io.questdb.cairo.sql;
 
+import io.questdb.std.IntList;
+import io.questdb.std.QuietCloseable;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.Closeable;
+public interface PageFrameCursor extends QuietCloseable, SymbolTableSource {
 
-public interface PageFrameCursor extends Closeable, SymbolTableSource {
+    void calculateSize(RecordCursor.Counter counter);
+
+    /**
+     * Returns local (query) to table reader index mapping.
+     * Used to map local column indexes to indexes from the Parquet file.
+     * Such mapping requires knowing the corresponding table reader indexes.
+     */
+    IntList getColumnIndexes();
 
     @Override
-    void close(); // we don't throw IOException
+    StaticSymbolTable getSymbolTable(int columnIndex);
+
+    @Nullable
+    PageFrame next();
 
     /**
-     * Return the REAL row id of given row on current page .
-     * This is used for e.g. updating rows.
-     *
-     * @param rowIndex - page index of row
-     * @return real row id
-     */
-    long getUpdateRowId(long rowIndex);
-
-    @Nullable PageFrame next();
-
-    /**
-     * Return the cursor to the beginning of the page frame.
-     * Sets page address to first column.
-     */
-    void toTop();
-
-    /**
-     * @return size of page in bytes
+     * @return number of rows in all page frames
      */
     long size();
+
+    /**
+     * @return true if cursor supports fast size calculation,
+     * i.e. {@link #calculateSize(RecordCursor.Counter)} is properly implemented.
+     */
+    boolean supportsSizeCalculation();
+
+    /**
+     * Returns the cursor to the beginning of the page frame.
+     */
+    void toTop();
 }

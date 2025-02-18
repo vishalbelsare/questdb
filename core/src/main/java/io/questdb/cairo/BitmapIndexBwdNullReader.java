@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,26 +25,16 @@
 package io.questdb.cairo;
 
 import io.questdb.cairo.sql.RowCursor;
+import io.questdb.std.str.Path;
 
 public class BitmapIndexBwdNullReader implements BitmapIndexReader {
-
     private final NullCursor cursor = new NullCursor();
 
     @Override
     public RowCursor getCursor(boolean cachedInstance, int key, long minValue, long maxValue) {
         final NullCursor cursor = getCursor(cachedInstance);
-        cursor.value = maxValue;
+        cursor.value = maxValue - minValue;
         return cursor;
-    }
-
-    @Override
-    public int getKeyCount() {
-        return 1;
-    }
-
-    @Override
-    public boolean isOpen() {
-        return true;
     }
 
     @Override
@@ -53,17 +43,12 @@ public class BitmapIndexBwdNullReader implements BitmapIndexReader {
     }
 
     @Override
+    public int getKeyCount() {
+        return 1;
+    }
+
+    @Override
     public long getKeyMemorySize() {
-        return 0;
-    }
-
-    @Override
-    public long getValueBaseAddress() {
-        return 0;
-    }
-
-    @Override
-    public long getValueMemorySize() {
         return 0;
     }
 
@@ -73,8 +58,27 @@ public class BitmapIndexBwdNullReader implements BitmapIndexReader {
     }
 
     @Override
+    public long getValueBaseAddress() {
+        return 0;
+    }
+
+    @Override
     public int getValueBlockCapacity() {
         return 0;
+    }
+
+    @Override
+    public long getValueMemorySize() {
+        return 0;
+    }
+
+    @Override
+    public boolean isOpen() {
+        return true;
+    }
+
+    @Override
+    public void of(CairoConfiguration configuration, Path path, CharSequence name, long columnNameTxn, long unIndexedNullCount) {
     }
 
     private NullCursor getCursor(boolean cachedInstance) {

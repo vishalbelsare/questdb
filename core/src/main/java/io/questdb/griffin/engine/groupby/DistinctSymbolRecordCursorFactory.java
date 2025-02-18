@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,183 +24,147 @@
 
 package io.questdb.griffin.engine.groupby;
 
-import io.questdb.cairo.CairoEngine;
-import io.questdb.cairo.GenericRecordMetadata;
-import io.questdb.cairo.SymbolMapReader;
-import io.questdb.cairo.TableReader;
-import io.questdb.cairo.sql.*;
+import io.questdb.cairo.AbstractRecordCursorFactory;
+import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
+import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.std.BitSet;
 import io.questdb.std.Misc;
 
-public class DistinctSymbolRecordCursorFactory implements RecordCursorFactory {
+import static io.questdb.cairo.sql.SymbolTable.VALUE_IS_NULL;
+
+public class DistinctSymbolRecordCursorFactory extends AbstractRecordCursorFactory {
+    private final RecordCursorFactory base;
     private final DistinctSymbolRecordCursor cursor;
-    private final CairoEngine engine;
-    private final GenericRecordMetadata metadata;
-    private final String tableName;
-    private final long tableVersion;
-    private final int tableId;
 
     public DistinctSymbolRecordCursorFactory(
-            final CairoEngine engine,
-            final GenericRecordMetadata metadata,
-            final String tableName,
-            final int columnIndex,
-            final int tableId,
-            final long tableVersion) {
-        this.engine = engine;
-        this.metadata = metadata;
-        this.tableName = tableName;
-        this.tableVersion = tableVersion;
-        this.tableId = tableId;
-        this.cursor = new DistinctSymbolRecordCursor(columnIndex);
+            CairoConfiguration configuration,
+            RecordCursorFactory base
+    ) {
+        super(base.getMetadata());
+        this.base = base;
+        this.cursor = new DistinctSymbolRecordCursor(configuration.getCountDistinctCapacity());
     }
 
     @Override
-    public void close() {
-        cursor.close();
-    }
-
-    @Override
-    public RecordCursor getCursor(SqlExecutionContext executionContext) {
-        TableReader reader = engine.getReader(executionContext.getCairoSecurityContext(), tableName, tableId, tableVersion);
-        cursor.of(reader);
+    public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        cursor.of(baseCursor, executionContext);
         return cursor;
     }
 
     @Override
-    public RecordMetadata getMetadata() {
-        return metadata;
+    public boolean recordCursorSupportsRandomAccess() {
+        return base.recordCursorSupportsRandomAccess();
     }
 
     @Override
-    public boolean recordCursorSupportsRandomAccess() {
-        return true;
+    public void toPlan(PlanSink sink) {
+        sink.type("DistinctSymbol");
+        sink.child(base);
+    }
+
+    @Override
+    protected void _close() {
+        Misc.free(base);
     }
 
     private static class DistinctSymbolRecordCursor implements RecordCursor {
-        private final DistinctSymbolRecord recordA = new DistinctSymbolRecord();
-        private DistinctSymbolRecord recordB = null;
-        private TableReader reader;
-        private int numberOfSymbols;
-        private SymbolMapReader symbolMapReader;
-        private final int columnIndex;
+        private final BitSet seenKeySet;
+        private RecordCursor baseCursor;
+        private Record baseRecord;
+        private SqlExecutionCircuitBreaker circuitBreaker;
+        private int count = 0;
+        private int knownSymbolCount = -1;
+        // BitSet doesn't support negative values, so we track null key separately.
+        private boolean seenNull;
 
-        public DistinctSymbolRecordCursor(int columnIndex) {
-            this.columnIndex = columnIndex;
+        public DistinctSymbolRecordCursor(int bitSetCapacity) {
+            this.seenKeySet = new BitSet(bitSetCapacity);
         }
 
         @Override
         public void close() {
-            reader = Misc.free(reader);
+            baseCursor = Misc.free(baseCursor);
         }
 
         @Override
         public Record getRecord() {
-            return recordA;
-        }
-
-        @Override
-        public SymbolTable getSymbolTable(int columnIndex) {
-            // this is single column cursor
-            return symbolMapReader;
-        }
-
-        @Override
-        public SymbolTable newSymbolTable(int columnIndex) {
-            // this is single column cursor
-            return reader.newSymbolTable(this.columnIndex);
-        }
-
-        @Override
-        public boolean hasNext() {
-            if (recordA.getAndIncrementRecordIndex() < numberOfSymbols) {
-                return true;
-            }
-            recordA.decrementRecordIndex();
-            return false;
+            return baseCursor.getRecord();
         }
 
         @Override
         public Record getRecordB() {
-            if (recordB == null) {
-                recordB = new DistinctSymbolRecord();
+            return baseCursor.getRecordB();
+        }
+
+        @Override
+        public SymbolTable getSymbolTable(int columnIndex) {
+            return baseCursor.getSymbolTable(columnIndex);
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (count == knownSymbolCount) {
+                return false;
             }
-            recordB.reset();
-            return recordB;
+            while (baseCursor.hasNext()) {
+                final int symbolKey = baseRecord.getInt(0); // single column query
+                if (symbolKey != VALUE_IS_NULL && !seenKeySet.get(symbolKey)) {
+                    seenKeySet.set(symbolKey);
+                    count++;
+                    return true;
+                } else if (symbolKey == VALUE_IS_NULL && !seenNull) {
+                    seenNull = true;
+                    count++;
+                    return true;
+                }
+                circuitBreaker.statefulThrowExceptionIfTripped();
+            }
+            return false;
+        }
+
+        @Override
+        public SymbolTable newSymbolTable(int columnIndex) {
+            return baseCursor.newSymbolTable(columnIndex);
+        }
+
+        public void of(RecordCursor baseCursor, SqlExecutionContext executionContext) {
+            this.baseCursor = baseCursor;
+            baseRecord = baseCursor.getRecord();
+            circuitBreaker = executionContext.getCircuitBreaker();
+            // Single column query, hence 0 column index.
+            final SymbolTable symbolTable = baseCursor.getSymbolTable(0);
+            if (symbolTable instanceof StaticSymbolTable) {
+                final StaticSymbolTable staticSymbolTable = (StaticSymbolTable) symbolTable;
+                knownSymbolCount = staticSymbolTable.containsNullValue()
+                        ? staticSymbolTable.getSymbolCount() + 1
+                        : staticSymbolTable.getSymbolCount();
+            } else {
+                knownSymbolCount = -1;
+            }
+            toTop();
         }
 
         @Override
         public void recordAt(Record record, long atRowId) {
-            ((DistinctSymbolRecord) record).recordIndex = (int) atRowId;
-        }
-
-        @Override
-        public void toTop() {
-            recordA.reset();
-        }
-
-        public void of(TableReader reader) {
-            this.reader = reader;
-            this.symbolMapReader = reader.getSymbolMapReader(columnIndex);
-            this.numberOfSymbols = symbolMapReader.getSymbolCount() + (symbolMapReader.containsNullValue() ? 1 : 0);
-            this.recordA.reset();
+            baseCursor.recordAt(record, atRowId);
         }
 
         @Override
         public long size() {
-            return numberOfSymbols;
+            return -1;
         }
 
-        public class DistinctSymbolRecord implements Record {
-            private int recordIndex = -1;
-
-            public void decrementRecordIndex() {
-                recordIndex--;
-            }
-
-            @Override
-            public CharSequence getSym(int col) {
-                return symbolMapReader.valueOf(recordIndex);
-            }
-
-            @Override
-            public CharSequence getSymB(int col) {
-                return symbolMapReader.valueBOf(recordIndex);
-            }
-
-            @Override
-            public int getInt(int col) {
-                return recordIndex;
-            }
-
-            @Override
-            public CharSequence getStr(int col) {
-                return getSym(col);
-            }
-
-            @Override
-            public CharSequence getStrB(int col) {
-                return getSym(col);
-            }
-
-            @Override
-            public int getStrLen(int col) {
-                return getSym(col).length();
-            }
-
-            @Override
-            public long getRowId() {
-                return recordIndex;
-            }
-
-            public void reset() {
-                this.recordIndex = -1;
-            }
-
-            public long getAndIncrementRecordIndex() {
-                return ++recordIndex;
-            }
+        @Override
+        public void toTop() {
+            baseCursor.toTop();
+            seenKeySet.clear();
+            seenNull = false;
+            count = 0;
         }
     }
 }

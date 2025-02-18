@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -39,33 +39,40 @@ import java.io.Closeable;
 public class TextQueryProcessorState implements Mutable, Closeable {
     final StringSink query = new StringSink();
     private final HttpConnectionContext httpConnectionContext;
-    boolean countRows = false;
-    boolean noMeta = false;
-    RecordCursorFactory recordCursorFactory;
-    RecordMetadata metadata;
-    RecordCursor cursor;
+    int columnIndex;
     long count;
+    boolean countRows = false;
+    RecordCursor cursor;
+    char delimiter = ',';
+    String fileName;
+    boolean hasNext;
+    RecordMetadata metadata;
+    boolean noMeta = false;
+    boolean pausedQuery = false;
+    int queryState;
+    Record record;
+    RecordCursorFactory recordCursorFactory;
+    Rnd rnd;
     long skip;
     long stop;
-    Record record;
-    Rnd rnd;
-    int queryState = JsonQueryProcessorState.QUERY_PREFIX;
-    int columnIndex;
     private boolean queryCacheable = false;
-    String fileName;
 
     public TextQueryProcessorState(HttpConnectionContext httpConnectionContext) {
         this.httpConnectionContext = httpConnectionContext;
+        clear();
     }
 
     @Override
     public void clear() {
+        delimiter = ',';
+        fileName = null;
         metadata = null;
-        cursor = Misc.free(cursor);
+        rnd = null;
         record = null;
+        cursor = Misc.free(cursor);
         if (null != recordCursorFactory) {
             if (queryCacheable) {
-                QueryCache.getInstance().push(query, recordCursorFactory);
+                httpConnectionContext.getSelectCache().put(query, recordCursorFactory);
             } else {
                 recordCursorFactory.close();
             }
@@ -73,9 +80,14 @@ public class TextQueryProcessorState implements Mutable, Closeable {
         }
         queryCacheable = false;
         query.clear();
-        queryState = JsonQueryProcessorState.QUERY_PREFIX;
+        queryState = JsonQueryProcessorState.QUERY_SETUP_FIRST_RECORD;
         columnIndex = 0;
+        skip = 0;
+        stop = 0;
+        count = 0;
+        noMeta = false;
         countRows = false;
+        pausedQuery = false;
     }
 
     @Override

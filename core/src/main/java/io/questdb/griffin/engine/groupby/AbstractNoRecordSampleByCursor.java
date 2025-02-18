@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,52 +24,72 @@
 
 package io.questdb.griffin.engine.groupby;
 
+import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.map.MapValue;
-import io.questdb.cairo.sql.*;
 import io.questdb.cairo.sql.Record;
+import io.questdb.cairo.sql.*;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.griffin.engine.functions.SymbolFunction;
 import io.questdb.griffin.engine.functions.TimestampFunction;
+import io.questdb.griffin.engine.functions.constants.TimestampConstant;
+import io.questdb.std.Misc;
 import io.questdb.std.ObjList;
 import org.jetbrains.annotations.Nullable;
 
 public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCursor {
-    protected final int timestampIndex;
     protected final ObjList<GroupByFunction> groupByFunctions;
+    protected final GroupByFunctionsUpdater groupByFunctionsUpdater;
+    protected final int timestampIndex;
+    private final GroupByAllocator allocator;
     private final ObjList<Function> recordFunctions;
+    protected RecordCursor baseCursor;
     protected Record baseRecord;
-    protected long sampleLocalEpoch;
+    protected SqlExecutionCircuitBreaker circuitBreaker;
     // this epoch is generally the same as `sampleLocalEpoch` except for cases where
     // sampler passed thru Daytime Savings Transition date
     // diverging values tell `filling` implementations not to fill this gap
     protected long nextSampleLocalEpoch;
-    protected RecordCursor base;
-    protected SqlExecutionCircuitBreaker circuitBreaker;
+    protected long sampleLocalEpoch;
     protected long topTzOffset;
-    private long topNextDst;
+    private boolean areTimestampsInitialized;
+    private boolean isNotKeyedLoopInitialized;
+    private long rowId;
     private long topLocalEpoch;
+    private long topNextDst;
 
     public AbstractNoRecordSampleByCursor(
+            CairoConfiguration configuration,
             ObjList<Function> recordFunctions,
             int timestampIndex, // index of timestamp column in base cursor
             TimestampSampler timestampSampler,
             ObjList<GroupByFunction> groupByFunctions,
+            GroupByFunctionsUpdater groupByFunctionsUpdater,
             Function timezoneNameFunc,
             int timezoneNameFuncPos,
             Function offsetFunc,
-            int offsetFuncPos
+            int offsetFuncPos,
+            Function sampleFromFunc,
+            int sampleFromFuncPos,
+            Function sampleToFunc,
+            int sampleToFuncPos
     ) {
-        super(timestampSampler, timezoneNameFunc, timezoneNameFuncPos, offsetFunc, offsetFuncPos);
+        super(timestampSampler, timezoneNameFunc, timezoneNameFuncPos, offsetFunc, offsetFuncPos, sampleFromFunc, sampleFromFuncPos, sampleToFunc, sampleToFuncPos);
         this.timestampIndex = timestampIndex;
         this.recordFunctions = recordFunctions;
         this.groupByFunctions = groupByFunctions;
+        this.groupByFunctionsUpdater = groupByFunctionsUpdater;
+        this.allocator = GroupByAllocatorFactory.createAllocator(configuration);
+        GroupByUtils.setAllocator(groupByFunctions, allocator);
     }
 
     @Override
     public void close() {
-        base.close();
+        baseCursor = Misc.free(baseCursor);
+        Misc.free(allocator);
+        Misc.clearObjList(groupByFunctions);
         circuitBreaker = null;
     }
 
@@ -83,16 +103,18 @@ public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCur
         return ((SymbolFunction) recordFunctions.getQuick(columnIndex)).newSymbolTable();
     }
 
-    @Override
-    public void toTop() {
-        GroupByUtils.toTop(recordFunctions);
-        this.base.toTop();
-        this.localEpoch = topLocalEpoch;
-        this.sampleLocalEpoch = this.nextSampleLocalEpoch = topLocalEpoch;
-        // timezone offset is liable to change when we pass over DST edges
-        this.tzOffset = topTzOffset;
-        this.prevDst = Long.MIN_VALUE;
-        this.nextDstUTC = topNextDst;
+    public void of(RecordCursor baseCursor, SqlExecutionContext executionContext) throws SqlException {
+        this.baseCursor = baseCursor;
+        baseRecord = baseCursor.getRecord();
+        prevDst = Long.MIN_VALUE;
+        parseParams(baseCursor, executionContext);
+        topNextDst = nextDstUtc;
+        circuitBreaker = executionContext.getCircuitBreaker();
+        rowId = 0;
+        isNotKeyedLoopInitialized = false;
+        areTimestampsInitialized = false;
+        sampleFromFunc.init(baseCursor, executionContext);
+        sampleToFunc.init(baseCursor, executionContext);
     }
 
     @Override
@@ -100,45 +122,42 @@ public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCur
         return -1;
     }
 
-    public void of(RecordCursor base, SqlExecutionContext executionContext) throws SqlException {
-        this.prevDst = Long.MIN_VALUE;
-        parseParams(base, executionContext);
-
-        this.base = base;
-        this.baseRecord = base.getRecord();
-        final long timestamp = baseRecord.getTimestamp(timestampIndex);
-        if (rules != null) {
-            tzOffset = rules.getOffset(timestamp);
-            nextDstUTC = rules.getNextDST(timestamp);
-        }
-
-
-        if (tzOffset == 0 && fixedOffset == Long.MIN_VALUE) {
-            // this is the default path, we align time intervals to the first observation
-            timestampSampler.setStart(timestamp);
-        } else {
-            timestampSampler.setStart(this.fixedOffset != Long.MIN_VALUE ? this.fixedOffset : 0L);
-        }
-        this.topTzOffset = tzOffset;
-        this.topNextDst = nextDstUTC;
-        this.topLocalEpoch = this.localEpoch = timestampSampler.round(timestamp + tzOffset);
-        this.sampleLocalEpoch = this.nextSampleLocalEpoch = localEpoch;
-        circuitBreaker = executionContext.getCircuitBreaker();
+    @Override
+    public void toTop() {
+        GroupByUtils.toTop(recordFunctions);
+        baseCursor.toTop();
+        localEpoch = topLocalEpoch;
+        sampleLocalEpoch = nextSampleLocalEpoch = topLocalEpoch;
+        // timezone offset is liable to change when we pass over DST edges
+        tzOffset = topTzOffset;
+        prevDst = Long.MIN_VALUE;
+        nextDstUtc = topNextDst;
+        baseRecord = baseCursor.getRecord();
+        rowId = 0;
+        isNotKeyedLoopInitialized = false;
+        areTimestampsInitialized = false;
     }
 
-    protected long adjustDST(long timestamp, int n, @Nullable MapValue mapValue, long nextSampleTimestamp) {
+    private void kludge(long newTzOffset) {
+        // time moved forward, we need to make sure we move our sample boundary
+        sampleLocalEpoch += (newTzOffset - tzOffset);
+        nextSampleLocalEpoch = sampleLocalEpoch;
+        tzOffset = newTzOffset;
+    }
+
+    protected long adjustDst(long timestamp, @Nullable MapValue mapValue, long nextSampleTimestamp) {
         final long utcTimestamp = timestamp - tzOffset;
-        if (utcTimestamp < nextDstUTC) {
+        if (utcTimestamp < nextDstUtc) {
             return timestamp;
         }
         final long newTzOffset = rules.getOffset(utcTimestamp);
-        prevDst = nextDstUTC;
-        nextDstUTC = rules.getNextDST(utcTimestamp);
+        prevDst = nextDstUtc;
+        nextDstUtc = rules.getNextDST(utcTimestamp);
         // check if DST takes this timestamp back "before" the nextSampleTimestamp
         if (timestamp - (tzOffset - newTzOffset) < nextSampleTimestamp) {
             // time moved backwards, we need to check if we should be collapsing this
             // hour into previous period or not
-            updateValueWhenClockMovesBack(mapValue, n);
+            updateValueWhenClockMovesBack(mapValue);
             nextSampleLocalEpoch = timestampSampler.round(timestamp);
             localEpoch = nextSampleLocalEpoch;
             sampleLocalEpoch += (newTzOffset - tzOffset);
@@ -151,13 +170,13 @@ public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCur
         return utcTimestamp + newTzOffset;
     }
 
-    protected void adjustDSTInFlight(long t) {
-        if (t < nextDstUTC) {
+    protected void adjustDstInFlight(long utcEpoch) {
+        if (utcEpoch < nextDstUtc) {
             return;
         }
-        final long daylightSavings = rules.getOffset(t);
-        prevDst = nextDstUTC;
-        nextDstUTC = rules.getNextDST(t);
+        final long daylightSavings = rules.getOffset(utcEpoch);
+        prevDst = nextDstUtc;
+        nextDstUtc = rules.getNextDST(utcEpoch);
         kludge(daylightSavings);
     }
 
@@ -165,15 +184,51 @@ public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCur
         return baseRecord.getTimestamp(timestampIndex) + tzOffset;
     }
 
-    private void kludge(long newTzOffset) {
-        // time moved forward, we need to make sure we move our sample boundary
-        sampleLocalEpoch += (newTzOffset - tzOffset);
-        nextSampleLocalEpoch = sampleLocalEpoch;
-        tzOffset = newTzOffset;
+    protected void initTimestamps() {
+        if (areTimestampsInitialized) {
+            return;
+        }
+
+        if (!baseCursor.hasNext()) {
+            baseRecord = null;
+            return;
+        }
+
+        final long timestamp = baseRecord.getTimestamp(timestampIndex);
+
+        if (rules != null) {
+            tzOffset = rules.getOffset(timestamp);
+            nextDstUtc = rules.getNextDST(timestamp);
+        }
+
+        if (tzOffset == 0 && fixedOffset == Long.MIN_VALUE) {
+            // this is the default path, we align time intervals to the first observation
+            timestampSampler.setStart(timestamp);
+        } else {
+            // FROM-TO may apply to align to calendar queries, fixing the lower bound.
+            if (sampleFromFunc != TimestampConstant.NULL) {
+                timestampSampler.setStart(fixedOffset != Long.MIN_VALUE ? sampleFromFunc.getTimestamp(null) : 0L);
+            } else {
+                timestampSampler.setStart(fixedOffset != Long.MIN_VALUE ? fixedOffset : 0L);
+            }
+        }
+
+        topTzOffset = tzOffset;
+        topNextDst = nextDstUtc;
+        if (sampleFromFunc != TimestampConstant.NULL) {
+            // set the top epoch to be the lower limit
+            topLocalEpoch = timestampSampler.round(sampleFromFunc.getTimestamp(null) + tzOffset);
+            // set current epoch to be the floor of the starting timestamp
+            localEpoch = timestampSampler.round(timestamp + tzOffset);
+        } else {
+            topLocalEpoch = localEpoch = timestampSampler.round(timestamp + tzOffset);
+        }
+        sampleLocalEpoch = nextSampleLocalEpoch = topLocalEpoch;
+        areTimestampsInitialized = true;
     }
 
     protected void nextSamplePeriod(long timestamp) {
-        this.localEpoch = timestampSampler.round(timestamp);
+        localEpoch = timestampSampler.round(timestamp);
         // Sometimes rounding, especially around Days can throw localEpoch
         // to the "before" previous DST. When this happens we need to compensate for
         // tzOffset subtraction at the time of delivery of the timestamp to client
@@ -184,40 +239,45 @@ public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCur
     }
 
     protected boolean notKeyedLoop(MapValue mapValue) {
-        long next = timestampSampler.nextTimestamp(this.localEpoch);
-        this.sampleLocalEpoch = this.localEpoch;
-        this.nextSampleLocalEpoch = this.localEpoch;
-        // looks like we need to populate key map
-        // at the start of this loop 'lastTimestamp' will be set to timestamp
-        // of first record in base cursor
-        int n = groupByFunctions.size();
-        GroupByUtils.updateNew(groupByFunctions, n, mapValue, baseRecord);
-        while (base.hasNext()) {
-            long timestamp = getBaseRecordTimestamp();
+        if (!isNotKeyedLoopInitialized) {
+            sampleLocalEpoch = localEpoch;
+            nextSampleLocalEpoch = localEpoch;
+            // looks like we need to populate key map
+            // at the start of this loop 'lastTimestamp' will be set to timestamp
+            // of first record in base cursor
+            groupByFunctionsUpdater.updateNew(mapValue, baseRecord, rowId++);
+            isNotKeyedLoopInitialized = true;
+        }
+
+        long next = timestampSampler.nextTimestamp(localEpoch);
+        long timestamp;
+        while (baseCursor.hasNext()) {
+            timestamp = getBaseRecordTimestamp();
             if (timestamp < next) {
-                adjustDSTInFlight(timestamp - tzOffset);
-                GroupByUtils.updateExisting(groupByFunctions, n, mapValue, baseRecord);
                 circuitBreaker.statefulThrowExceptionIfTripped();
+                adjustDstInFlight(timestamp - tzOffset);
+                groupByFunctionsUpdater.updateExisting(mapValue, baseRecord, rowId++);
             } else {
                 // timestamp changed, make sure we keep the value of 'lastTimestamp'
                 // unchanged. Timestamp columns uses this variable
                 // When map is exhausted we would assign 'next' to 'lastTimestamp'
                 // and build another map
-                timestamp = adjustDST(timestamp, n, mapValue, next);
+                timestamp = adjustDst(timestamp, mapValue, next);
                 if (timestamp != Long.MIN_VALUE) {
                     nextSamplePeriod(timestamp);
+                    isNotKeyedLoopInitialized = false;
                     return true;
                 }
             }
         }
-
-        // opportunity, after we stream map that is.
+        // opportunity, after we stream map that's it
         baseRecord = null;
+        isNotKeyedLoopInitialized = false;
         return true;
     }
 
-    protected void updateValueWhenClockMovesBack(MapValue value, int n) {
-        GroupByUtils.updateExisting(groupByFunctions, n, value, baseRecord);
+    protected void updateValueWhenClockMovesBack(MapValue value) {
+        groupByFunctionsUpdater.updateExisting(value, baseRecord, rowId);
     }
 
     protected class TimestampFunc extends TimestampFunction implements Function {
@@ -228,8 +288,8 @@ public abstract class AbstractNoRecordSampleByCursor extends AbstractSampleByCur
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public void toPlan(PlanSink sink) {
+            sink.val("Timestamp");
         }
     }
 }

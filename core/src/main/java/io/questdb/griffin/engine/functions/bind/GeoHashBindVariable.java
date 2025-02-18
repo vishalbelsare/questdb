@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.GeoHashes;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.ScalarFunction;
+import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.AbstractGeoHashFunction;
 import io.questdb.std.Mutable;
 
@@ -49,11 +50,6 @@ class GeoHashBindVariable extends AbstractGeoHashFunction implements ScalarFunct
     }
 
     @Override
-    public short getGeoShort(Record rec) {
-        return (short) value;
-    }
-
-    @Override
     public int getGeoInt(Record rec) {
         return (int) value;
     }
@@ -64,13 +60,23 @@ class GeoHashBindVariable extends AbstractGeoHashFunction implements ScalarFunct
     }
 
     @Override
+    public short getGeoShort(Record rec) {
+        return (short) value;
+    }
+
+    @Override
+    public boolean isThreadSafe() {
+        return true;
+    }
+
+    @Override
     public boolean isRuntimeConstant() {
         return true;
     }
 
     @Override
-    public boolean isReadThreadSafe() {
-        return true;
+    public void toPlan(PlanSink sink) {
+        sink.val("?::geohash");
     }
 
     void setType(int type) {

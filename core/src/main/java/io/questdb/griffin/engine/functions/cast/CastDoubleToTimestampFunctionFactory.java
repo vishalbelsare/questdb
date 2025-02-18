@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2022 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,8 +29,6 @@ import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.griffin.FunctionFactory;
 import io.questdb.griffin.SqlExecutionContext;
-import io.questdb.griffin.engine.functions.TimestampFunction;
-import io.questdb.griffin.engine.functions.UnaryFunction;
 import io.questdb.std.IntList;
 import io.questdb.std.Numbers;
 import io.questdb.std.ObjList;
@@ -43,25 +41,18 @@ public class CastDoubleToTimestampFunctionFactory implements FunctionFactory {
 
     @Override
     public Function newInstance(int position, ObjList<Function> args, IntList argPositions, CairoConfiguration configuration, SqlExecutionContext sqlExecutionContext) {
-        return new Func(args.getQuick(0));
+        return new CastDoubleToTimestampFunction(args.getQuick(0));
     }
 
-    private static class Func extends TimestampFunction implements UnaryFunction {
-        private final Function arg;
-
-        public Func(Function arg) {
-            this.arg = arg;
-        }
-
-        @Override
-        public Function getArg() {
-            return arg;
+    public static class CastDoubleToTimestampFunction extends AbstractCastToTimestampFunction {
+        public CastDoubleToTimestampFunction(Function arg) {
+            super(arg);
         }
 
         @Override
         public long getTimestamp(Record rec) {
             final double value = arg.getDouble(rec);
-            return Double.isNaN(value) ? Numbers.LONG_NaN : (long) value;
+            return Numbers.isNull(value) || value > Long.MAX_VALUE || value < Long.MIN_VALUE ? Numbers.LONG_NULL : (long) value;
         }
     }
 }
